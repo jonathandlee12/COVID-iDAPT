@@ -1,7 +1,7 @@
 # SARS-CoV-2 spike sequence dictates host TP53 activity and COVID-19 pathogenicity
 
 This repository provides instructions, code, and supplementary data files to reproduce results and figures from our iDAPT COVID paper
-> Jonathan D. Lee, Bridget Menasche, Maria Mavrikaki, Madison M. Uyemura, Su Min Hong, Nina Kozlova, Jin Wei, Mia M. Alfajaro, Renata B. Filler, Arne Muller, Ryan R. Posey, Priscilla Cheung, Taru Muranen, Joao A. Paulo, Craig B. Wilen, Frank J. Slack. 
+> Jonathan D. Lee, Bridget Menasche, Maria Mavrikaki, Madison M. Uyemura, Su Min Hong, Nina Kozlova, Jin Wei, Mia M. Alfajaro, Renata B. Filler, Arne Muller, Ryan R. Posey, Priscilla Cheung, Taru Muranen, Joao A. Paulo, Craig B. Wilen, Frank J. Slack. SARS-CoV-2 spike sequence dictates host TP53 activity and COVID-19 pathogenicity. Unpublished.
 
 ## Abstract
 
