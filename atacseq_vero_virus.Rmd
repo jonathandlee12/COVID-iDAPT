@@ -1,0 +1,222 @@
+---
+title: "2021-01-06_atacseq"
+output:
+  pdf_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+#devtools::install_github("GreenleafLab/chromVARmotifs")
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("chromVAR")
+#biocLite("motifmatchr")
+#biocLite("BSgenome.Hsapiens.UCSC.hg38")
+#BiocManager::install("chromVAR")
+#install.packages("/Users/jonathanlee/Dropbox/RESEARCH/RESEARCH_SLACK/P COVID iDAPT/chlsab_bsgenome/BSgenome.CSabaeus.UCSC.chlSab2_1.0.0.tar.gz", repos = NULL, type="source")
+#BiocManager::install("motifmatchr")
+
+library(chromVAR)
+library(motifmatchr)
+library(BSgenome.CSabaeus.UCSC.chlSab2)
+
+library(plyr)
+library(DESeq2)
+library(ggplot2)
+library(data.table)
+library(biomaRt)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(clusterProfiler)
+library(stringr)
+library(reactome.db)
+library(OmnipathR)
+library(gprofiler2)
+library(igraph)
+library(preprocessCore)
+library(apeglm)
+library(limma)
+
+### helper function ####
+substrLeft <- function(x, n){
+  substr(x, 1, nchar(x)-n)
+}
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+########################
+```
+
+```{r, eval=T}
+# module load gcc/6.2.0 bedtools/2.27.1
+peakfile <- "datafiles/vero_sorted_peaks.clipped.nonzero.bed" # FDR 1% from macs2
+bamfiles <- list.files(path="/Users/jonathanlee/Desktop/atacseq_vero_virus/",pattern=".bam", full.names=T)
+load("/Users/jonathanlee/Dropbox/RESEARCH/RESEARCH_SLACK/P COVID iDAPT/motifs/csab_cisbp_pwms.rda")
+```
+
+```{r, eval=T}
+# read in ATAC-seq read pileups within peaks from bash
+atac_counts <- read.table(file="datafiles/vero_atacseq_counts.txt", header=T)
+atac_counts <- atac_counts[!duplicated(atac_counts),]
+row.names(atac_counts) <- atac_counts[,1]
+atac_counts <- atac_counts[,-1]
+
+# read in ATAC-seq library information
+sampleinfo <- read.csv(file="sample_info.csv")
+row.names(sampleinfo) <- sampleinfo$Sample
+
+colnames(atac_counts) <- str_replace_all(unlist(strsplit(colnames(atac_counts), "_"))[c(F,F,T)], "S", "")
+sampleinfo <- sampleinfo[match(colnames(atac_counts), sampleinfo$Number),]
+colnames(atac_counts) <- row.names(sampleinfo)
+
+sampleinfo$Group <- factor(sampleinfo$Group, level=c("Mock", "HKU5-SARS", "SARS2", "MERS"))
+```
+
+```{r, eval=T, fig.width=1, fig.height=1}
+tss_values <- NULL
+for(f in list.files(path="datafiles/", full.names = T, pattern="distToTSS.txt")){
+  tss <- read.table(file=f, sep=' ', header=T)
+  print(ggplot(tss, aes(x=Position/1000, y=Count)) + geom_line() + theme_classic() + ylim(c(0,2000)) + xlab("TSS Position (kb)") + ylab("# Reads")+ ggtitle(subset(sampleinfo, Number==str_replace_all(strsplit(f, "_")[[1]][3], "S", ""))$Sample) + theme(plot.title = element_text(size = 10))) 
+  tss_values <- rbind(tss_values, cbind(sample=f, tss=mean(tss[c(2001 + seq(-5,5)),1])/mean(tss[1:200,1])))
+}
+```
+
+```{r, eval=T}
+tss_values <- data.frame(tss_values)
+tss_values$TSS <- as.numeric(as.character(tss_values$tss))
+tss_values$index <- str_replace_all(unlist(strsplit(tss_values$sample, "_"))[c(F,F,T,F)], "S", "")
+tss_values <- merge(tss_values, sampleinfo[,c("Number", "Sample", "Group")], by.x="index", by.y="Number")
+tss_values <- tss_values[,c("Sample", "Group", "TSS")]
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=3}
+gp <- ggplot(tss_values, aes(x=Group, y=TSS)) + geom_point() + theme_classic() + geom_hline(yintercept=0, lty=3) + xlab("") + ylab("TSS-to-Background\nInsertion Ratio") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+gp
+
+ggsave(gp, file="fig_vero_atac_tss.pdf", "pdf", width=1.5, height=3)
+```
+
+```{r, eval=T}
+atac_dds <- DESeqDataSetFromMatrix(countData = atac_counts, colData = sampleinfo, design = ~Group)
+atac_dds <- estimateSizeFactors(atac_dds)
+```
+
+```{r, eval=T}
+atac_vst <- assay(varianceStabilizingTransformation(atac_dds))
+```
+
+```{r, eval=T, fig.width=4, fig.height=3}
+atac_pc <- prcomp(t(atac_vst))
+
+gp <- ggplot(data.frame(atac_pc$x, Sample=sampleinfo[colnames(atac_vst),"Group"]), aes(PC1, PC2)) + 
+  geom_point(aes(colour = Sample), size=3)  + theme_classic() + xlab(paste0("PC1 (", 100*summary(atac_pc)$importance[2,1], "% of variance)")) + ylab(paste0("PC2 (", 100*summary(atac_pc)$importance[2,2], "% of variance)")) + geom_vline(xintercept=0, lty=3, color="red")
+gp
+
+ggsave(gp, file="fig_vero_atac_pca.pdf", "pdf", width=4, height=3)
+```
+
+```{r, eval=T}
+atac_dds <- DESeq(atac_dds)
+```
+
+```{r, eval=T}
+#vero_sars1_results <- data.frame(results(atac_dds, contrast=c("Group", "HKU5-SARS", "Mock")))
+#vero_sars2_results <- data.frame(results(atac_dds, contrast=c("Group", "SARS2", "Mock")))
+#vero_mers_results <- data.frame(results(atac_dds, contrast=c("Group", "MERS", "Mock")))
+
+vero_sars1_results <- data.frame(lfcShrink(atac_dds, coef=2))
+vero_sars2_results <- data.frame(lfcShrink(atac_dds, coef=3))
+vero_mers_results <- data.frame(lfcShrink(atac_dds, coef=4))
+```
+
+```{r, eval=T}
+write.table(vero_sars2_results, file="vero_sars2.mock_atacseq.txt", sep='\t', quote=F)
+write.table(vero_sars1_results, file="vero_sars1.mock_atacseq.txt", sep='\t', quote=F)
+write.table(vero_mers_results, file="vero_mers.mock_atacseq.txt", sep='\t', quote=F)
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+gp <- ggplot(vero_sars1_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(vero_sars1_results), padj > 0.05)) + geom_point(pch=20, color="skyblue", data=subset(subset(vero_sars1_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="indianred", data=subset(subset(vero_sars1_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-5,5)) + ylim(c(0,120)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq Log2 Fold Change,\nVero HKU5-SARS vs. Mock")
+gp
+
+ggsave(gp, file="fig_vero_atac_vplot_sars1.png", "png", width=3, height=3)
+
+gp <- ggplot(vero_sars2_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(vero_sars2_results), padj > 0.05)) + geom_point(pch=20, color="skyblue", data=subset(subset(vero_sars2_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="indianred", data=subset(subset(vero_sars2_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-5,5)) + ylim(c(0,120)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq Log2 Fold Change,\nVero SARS2 vs. Mock")
+gp
+
+ggsave(gp, file="fig_vero_atac_vplot_sars2.png", "png", width=3, height=3)
+
+gp <- ggplot(vero_mers_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(vero_mers_results), padj > 0.05)) + geom_point(pch=20, color="skyblue", data=subset(subset(vero_mers_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="indianred", data=subset(subset(vero_mers_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-5,5)) + ylim(c(0,120)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq Log2 Fold Change,\nVero MERS vs. Mock")
+gp
+
+ggsave(gp, file="fig_vero_atac_vplot_mers.png", "png", width=3, height=3)
+```
+
+# ChromVAR analysis
+
+```{r, eval=T}
+peaks.bed <- read.table(file=peakfile, sep='\t')
+peaks <- readNarrowpeaks(peakfile)
+peaks@seqnames@values <- factor(str_replace_all(peaks@seqnames@values, "chr", ""))
+peaks@seqinfo@seqnames <- str_replace_all(peaks@seqinfo@seqnames, "chr", "")
+
+bam_index <- str_replace_all(str_replace_all(bamfiles, ".*S", ""), "_.*","")
+
+fragment_counts <- getCounts(bamfiles, peaks, 
+                              paired =  TRUE, 
+                              by_rg = F, 
+                              format = "bam", 
+                              colData = DataFrame(row.names = sampleinfo[match(bam_index, sampleinfo$Number),]$Sample,
+                                                  group = sampleinfo[match(bam_index, sampleinfo$Number),]$Group))
+
+fragment_counts@rowRanges@seqnames@values <- factor(paste0("chr",fragment_counts@rowRanges@seqnames@values))
+fragment_counts@rowRanges@seqnames@values <- factor(fragment_counts@rowRanges@seqnames@values, levels=as.character(fragment_counts@rowRanges@seqnames@values))
+fragment_counts@rowRanges@seqinfo@seqnames <- paste0("chr",fragment_counts@rowRanges@seqinfo@seqnames)
+
+fragment_counts <- addGCBias(fragment_counts, genome = BSgenome.CSabaeus.UCSC.chlSab2)
+counts_filtered <- filterSamples(fragment_counts)
+counts_filtered <- filterPeaks(counts_filtered) # min_in_peaks 10%
+
+motif_ix <- matchMotifs(csab_cisbp_pwms, counts_filtered, genome = BSgenome.CSabaeus.UCSC.chlSab2)
+
+# computing deviations
+dev <- computeDeviations(object = counts_filtered, annotations = motif_ix)
+dev <- dev[which(!is.na(rowSums(deviations(dev)))),]
+```
+
+```{r, eval=T}
+chromvar_results_full <- data.frame()
+
+chromvar_results <- differentialDeviations(dev[which(!is.na(rowSums(deviations(dev)))),c(1:4,9:12)], groups="group")
+chromvar_results$delta <- rowMeans(deviations(dev[which(!is.na(rowSums(deviations(dev)))),])[,1:4]) - rowMeans(deviations(dev[which(!is.na(rowSums(deviations(dev)))),])[,9:12])
+chromvar_results$signed_logp <- sign(chromvar_results$delta) * -log10(chromvar_results$p_value_adjusted)
+chromvar_results$gene <- row.names(chromvar_results)
+chromvar_results$group <- "SARS2"
+chromvar_results_full <- rbind(chromvar_results_full, chromvar_results)
+
+chromvar_results <- differentialDeviations(dev[which(!is.na(rowSums(deviations(dev)))),c(5:8,9:12)], groups="group")
+chromvar_results$delta <- rowMeans(deviations(dev[which(!is.na(rowSums(deviations(dev)))),])[,5:8]) - rowMeans(deviations(dev[which(!is.na(rowSums(deviations(dev)))),])[,9:12])
+chromvar_results$signed_logp <- sign(chromvar_results$delta) * -log10(chromvar_results$p_value_adjusted)
+chromvar_results$gene <- row.names(chromvar_results)
+chromvar_results$group <- "MERS"
+chromvar_results_full <- rbind(chromvar_results_full, chromvar_results)
+
+chromvar_results <- differentialDeviations(dev[which(!is.na(rowSums(deviations(dev)))),c(13:16,9:12)], groups="group")
+chromvar_results$delta <- rowMeans(deviations(dev[which(!is.na(rowSums(deviations(dev)))),])[,13:16]) - rowMeans(deviations(dev[which(!is.na(rowSums(deviations(dev)))),])[,9:12])
+chromvar_results$signed_logp <- sign(chromvar_results$delta) * -log10(chromvar_results$p_value_adjusted)
+chromvar_results$gene <- row.names(chromvar_results)
+chromvar_results$group <- "HKU5-SARS"
+chromvar_results_full <- rbind(chromvar_results_full, chromvar_results)
+chromvar_results_full <- data.frame(chromvar_results_full)
+```
+
+```{r, eval=T}
+write.table(chromvar_results_full, file="vero_chromvar_results.txt", sep='\t', row.names=F, quote=F)
+```
+
+

@@ -1,0 +1,240 @@
+---
+title: "2021-01-07_atacseq"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#devtools::install_github("GreenleafLab/chromVARmotifs")
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("chromVAR")
+#biocLite("motifmatchr")
+#biocLite("BSgenome.Hsapiens.UCSC.hg38")
+#BiocManager::install("chromVAR")
+#install.packages("/Users/jonathanlee/Dropbox/RESEARCH/RESEARCH_SLACK/P COVID iDAPT/chlsab_bsgenome/BSgenome.CSabaeus.UCSC.chlSab2_1.0.0.tar.gz", repos = NULL, type="source")
+#BiocManager::install("motifmatchr")
+
+library(chromVAR)
+library(motifmatchr)
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+library(plyr)
+library(DESeq2)
+library(ggplot2)
+library(data.table)
+library(biomaRt)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(clusterProfiler)
+library(stringr)
+library(reactome.db)
+library(OmnipathR)
+library(gprofiler2)
+library(igraph)
+library(preprocessCore)
+library(apeglm)
+library(limma)
+
+### helper function ####
+substrLeft <- function(x, n){
+  substr(x, 1, nchar(x)-n)
+}
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+########################
+```
+
+# peak calling
+
+```{r, eval=F}
+####
+#### Calu3 Virus (vs nutlin) analysis
+####
+
+module load gcc/6.2.0
+module load python/2.7.12
+module load macs2/2.1.1.20160309
+module load bedtools/2.27.1
+ 
+macs2 callpeak --nomodel --shift -100 --extsize 200 --nolambda -q 0.01 --keep-dup all --call-summits -t ../bowtie2/*S{19,20,21,25,26,27}_sorted.noM.norep.bam -g hs -n calu3_re --outdir ./
+
+module load gcc/6.2.0 bedtools/2.27.1
+
+cat calu3_re_peaks.narrowPeak | awk '{print "chr"$0}' > calu3_re_peaks.narrowPeak.bed
+
+bedtools subtract -a calu3_re_peaks.narrowPeak.bed -b /home/jdl22/pandolfi/myNGSdir/GRCh38/hg38-blacklist.v2.bed > calu3_re_peaks_noblacklist.bed
+
+cut -c 4- calu3_re_peaks_noblacklist.bed > calu3_re_peaks_noblacklist.nochr.bed
+
+bedtools multicov -bams ../bowtie2/*S{19,20,21,25,26,27}_sorted.noM.norep.bam /home/jdl22/slack/2022-02-18_atac/calu_nut/bowtie2/*_sorted.noM.norep.bam -bed calu3_re_peaks_noblacklist.nochr.bed > calu3_re_atacseq_count.txt
+ 
+for f in ../bowtie2/*S{19,20,21,25,26,27}_sorted.noM.norep.bam /home/jdl22/slack/2022-02-18_atac/calu_nut/bowtie2/*_sorted.noM.norep.bam; do echo $(basename $f _sorted.noM.norep.bam); done | tr '\n' '\t' | paste <(echo "position") - > calu3_re_header.txt
+ 
+cat calu3_re_atacseq_count.txt | awk -vOFS='\t' '{printf "chr"$1":"$2"-"$3"\t"; for (i=11; i<NF; i++) printf $i"\t"; print $NF}' > calu3_re_atacseq_count.tmp.txt
+ 
+cat calu3_re_header.txt calu3_re_atacseq_count.tmp.txt > calu3_re_atacseq_counts.txt
+
+```
+
+```{r, eval=T}
+# read in ATAC-seq read pileups within peaks from bash
+atac_counts <- read.table(file="datafiles2/calu3_re_atacseq_counts.txt", header=T)
+atac_counts <- atac_counts[!duplicated(atac_counts),]
+row.names(atac_counts) <- atac_counts[,1]
+atac_counts <- atac_counts[,-1]
+
+atac_counts <- atac_counts[,1:6]
+
+# read in ATAC-seq library information
+sampleinfo <- read.csv(file="sample_info.csv")
+row.names(sampleinfo) <- sampleinfo$Sample
+
+colnames(atac_counts) <- str_replace_all(unlist(strsplit(colnames(atac_counts), "_"))[c(F,F,T)], "S", "")
+sampleinfo <- sampleinfo[match(colnames(atac_counts), sampleinfo$Number),]
+colnames(atac_counts) <- row.names(sampleinfo)
+
+sampleinfo$Group <- factor(unlist(strsplit(sampleinfo$Sample, "-"))[c(F,T,F)], levels=c("Mock",  "SARS2"))
+```
+
+```{r, eval=T, fig.width=1, fig.height=0.8}
+for(f in list.files(path="datafiles/", pattern="insertsize2.txt", full.names = T)){
+  insertsize <- read.table(file=f, sep='\t', header=T)
+  print(ggplot(insertsize, aes(x=size, y=count)) + geom_line() + theme_classic() + ylim(c(0,20000)) + xlim(c(0,1000)) + xlab("Insert Size (bp)") + ylab("# Reads") + ggtitle(subset(sampleinfo, Number==str_replace_all(strsplit(f, "_")[[1]][3], "S", ""))$Sample) + theme(plot.title = element_text(size = 10)))
+}
+```
+
+```{r, eval=T, fig.width=1, fig.height=1}
+tss_values <- NULL
+for(f in list.files(path="datafiles/", full.names = T, pattern="distToTSS.txt")){
+  tss <- read.table(file=f, sep=' ', header=T)
+  print(ggplot(tss, aes(x=Position/1000, y=Count)) + geom_line() + theme_classic() + ylim(c(0,2000)) + xlab("TSS Position (kb)") + ylab("# Reads")+ ggtitle(subset(sampleinfo, Number==str_replace_all(strsplit(f, "_")[[1]][3], "S", ""))$Sample) + theme(plot.title = element_text(size = 10))) 
+  tss_values <- rbind(tss_values, cbind(sample=f, tss=mean(tss[c(2001 + seq(-5,5)),1])/mean(tss[1:200,1])))
+}
+```
+
+```{r, eval=T}
+tss_values <- data.frame(tss_values)
+tss_values$TSS <- as.numeric(as.character(tss_values$tss))
+tss_values$index <- str_replace_all(unlist(strsplit(tss_values$sample, "_"))[c(F,F,T,F)], "S", "")
+tss_values <- merge(tss_values, sampleinfo[,c("Number", "Sample", "Group")], by.x="index", by.y="Number")
+tss_values <- tss_values[,c("Sample", "Group", "TSS")]
+```
+
+```{r, eval=T, fig.width=1, fig.height=1.5}
+ggplot(tss_values, aes(x=Group, y=TSS)) + geom_point() + theme_classic() + geom_hline(yintercept=0, lty=3) + xlab("") + ylab("TSS-to-Background\nInsertion Ratio")
+```
+
+```{r, eval=T}
+atac_dds <- DESeqDataSetFromMatrix(countData = atac_counts, colData = sampleinfo, design = ~Group)
+#atac_dds <- estimateSizeFactors(atac_dds, controlGenes=row.names(atac_counts) %in% atac_invariant_tss)
+atac_dds <- estimateSizeFactors(atac_dds)
+```
+
+```{r, eval=T}
+atac_vst <- assay(varianceStabilizingTransformation(atac_dds))
+```
+
+```{r, eval=T, fig.width=2, fig.height=1.2}
+atac_pc <- prcomp(t(atac_vst))
+
+ggplot(data.frame(atac_pc$x, Sample=sampleinfo[colnames(atac_vst),"Group"]), aes(PC1, PC2)) + 
+  geom_point(aes(colour = Sample), size=1, pch=1)  + theme_classic() + xlab(paste0("PC1 (", 100*summary(atac_pc)$importance[2,1], "% of variance)")) + ylab(paste0("PC2 (", 100*summary(atac_pc)$importance[2,2], "% of variance)")) + geom_vline(xintercept=0, lty=3, color="red")
+```
+
+```{r, eval=T}
+atac_dds <- DESeq(atac_dds)
+```
+
+```{r, eval=T}
+results_calu3_sars2.mock <- data.frame(lfcShrink(dds=atac_dds, coef=2, 
+                                                 res=results(atac_dds,contrast=c("Group", "SARS2", "Mock"))))
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+ggplot(results_calu3_sars2.mock, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(results_calu3_sars2.mock, padj > 0.05)) + geom_point(pch=20, color="skyblue", data=subset(results_calu3_sars2.mock, padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="indianred", data=subset(results_calu3_sars2.mock, padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-3.5,5)) + ylim(c(0,240)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("Log2 Fold Change, ATAC-seq\nCalu-3 SARS-2 vs. Mock")
+```
+
+```{r, eval=F}
+#### Calu3 virus vs pInd20 G/S analysis
+
+module load gcc/6.2.0
+module load python/2.7.12
+module load macs2/2.1.1.20160309
+module load bedtools/2.27.1
+
+bedtools multicov -bams /home/jdl22/slack/2022-02-18_atac/calu_pind20/bowtie2/*S{25,26,27,28}_sorted.noM.norep.bam -bed calu3_re_peaks_noblacklist.nochr.bed > calu3_re_gs_atacseq_count.txt
+ 
+for f in /home/jdl22/slack/2022-02-18_atac/calu_pind20/bowtie2/*S{25,26,27,28}_sorted.noM.norep.bam; do echo $(basename $f _sorted.noM.norep.bam); done | tr '\n' '\t' | paste <(echo "position") - > calu3_re_gs_header.txt
+ 
+cat calu3_re_gs_atacseq_count.txt | awk -vOFS='\t' '{printf "chr"$1":"$2"-"$3"\t"; for (i=11; i<NF; i++) printf $i"\t"; print $NF}' > calu3_re_gs_atacseq_count.tmp.txt
+ 
+cat calu3_re_gs_header.txt calu3_re_gs_atacseq_count.tmp.txt > calu3_re_gs_atacseq_counts.txt
+```
+
+```{r, eval=T}
+# read in ATAC-seq read pileups within peaks from bash
+atac_counts_gs <- read.table(file="datafiles2/calu3_re_gs_atacseq_counts.txt", header=T)
+atac_counts_gs <- atac_counts_gs[!duplicated(atac_counts_gs),]
+row.names(atac_counts_gs) <- atac_counts_gs[,1]
+atac_counts_gs <- atac_counts_gs[,-1]
+
+# read in ATAC-seq library information
+sampleinfo_gs <- data.frame(Group = c("EGFP", "EGFP", "Spike", "Spike"), 
+                            row.names = c("Calu3-pInd20-EGFP-1",
+                                          "Calu3-pInd20-EGFP-2",
+                                          "Calu3-pInd20-Spike-1",
+                                          "Calu3-pInd20-Spike-2"))
+
+colnames(atac_counts_gs) <- row.names(sampleinfo_gs)
+```
+
+```{r, eval=T}
+atac_dds_gs <- DESeqDataSetFromMatrix(countData = atac_counts_gs, colData = sampleinfo_gs, design = ~Group)
+#atac_dds <- estimateSizeFactors(atac_dds, controlGenes=row.names(atac_counts) %in% atac_invariant_tss)
+atac_dds_gs <- estimateSizeFactors(atac_dds_gs)
+```
+
+```{r, eval=T}
+atac_vst_gs <- assay(varianceStabilizingTransformation(atac_dds_gs))
+```
+
+```{r, eval=T, fig.width=2, fig.height=1.2}
+atac_pc_gs <- prcomp(t(atac_vst_gs))
+
+ggplot(data.frame(atac_pc_gs$x, Sample=sampleinfo_gs[colnames(atac_vst_gs),"Group"]), aes(PC1, PC2)) + 
+  geom_point(aes(colour = Sample), size=1, pch=1)  + theme_classic() + xlab(paste0("PC1 (", 100*summary(atac_pc_gs)$importance[2,1], "% of variance)")) + ylab(paste0("PC2 (", 100*summary(atac_pc_gs)$importance[2,2], "% of variance)")) + geom_vline(xintercept=0, lty=3, color="red")
+```
+
+```{r, eval=T}
+atac_dds_gs <- DESeq(atac_dds_gs)
+atac_results_spike <- data.frame(lfcShrink(dds=atac_dds_gs, coef=2, 
+                                 res=results(atac_dds_gs,contrast=c("Group", "Spike", "EGFP"))))
+```
+
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+gp <- ggplot(atac_results_spike, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(atac_results_spike), padj > 0.05)) + geom_point(pch=20, color="skyblue", data=subset(subset(atac_results_spike), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="indianred", data=subset(subset(atac_results_spike), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("Log2 Fold Change, ATAC-seq\nCalu-3 pInducer20 Spike vs. EGFP") # + xlim(c(-5,5)) + ylim(c(0,120))
+gp
+```
+
+```{r, eval=T}
+cor.test((subset(merge(results_calu3_sars2.mock, atac_results_spike, by=0), padj.x < .2 & padj.y < .2)$log2FoldChange.x),
+    (subset(merge(results_calu3_sars2.mock, atac_results_spike, by=0), padj.x < .2 & padj.y < .2)$log2FoldChange.y))
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+ggplot(subset(merge(results_calu3_sars2.mock, atac_results_spike, by=0), padj.x < 0.2 & padj.y < 0.2)) + geom_point(aes(x=(log2FoldChange.x), y=(log2FoldChange.y)), alpha=0.5) + xlim(c(-4,4)) + ylim(c(-4,4)) + geom_smooth(method="lm", formula=y~x, aes(x=(log2FoldChange.x), y=(log2FoldChange.y))) + theme_classic() + geom_hline(yintercept=0, lty=3) + geom_vline(xintercept=0, lty=3) + xlab("Calu-3 SARS-CoV-2 vs. Mock\nLog2 Fold Change, ATAC-seq") + ylab("Calu-3 Spike vs. EGFP\nLog2 Fold Change, ATAC-seq")
+```
+
+```{r, eval=T}
+write.table(atac_results_spike, file="atacseq_calu3_gs.txt", sep='\t', quote=F)
+write.table(results_calu3_sars2.mock, file="atacseq_calu3_sars2.txt", sep='\t', quote=F)
+```
+
+
+
+
