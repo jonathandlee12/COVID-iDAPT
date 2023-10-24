@@ -1,7 +1,9 @@
 # Differences in syncytia formation by SARS-CoV-2 variants modify host chromatin accessibility and cellular senescence via TP53
 
-This repository provides code to reproduce main figure visualizations from our iDAPT-MS COVID paper
-> Jonathan D. Lee, Bridget L. Menasche, Maria Mavrikaki, Madison M. Uyemura, Su Min Hong, Nina Kozlova, Jin Wei, Mia M. Alfajaro, Renata B. Filler, Arne Muller, Tanvi Saxena, Ryan R. Posey, Priscilla Cheung, Taru Muranen, Yujing J. Heng, Joao A. Paulo, Craig B. Wilen, Frank J. Slack. Differences in syncytia formation by SARS-CoV-2 variants modify host chromatin accessibility and cellular senescence via TP53. Cell Reports 2023. 
+This repository provides code and key datasets to reproduce R analyses and main figure visualizations of sequencing and mass spectrometry datasets from our iDAPT-MS COVID paper
+> Jonathan D. Lee, Bridget L. Menasche, Maria Mavrikaki, Madison M. Uyemura, Su Min Hong, Nina Kozlova, Jin Wei, Mia M. Alfajaro, Renata B. Filler, Arne Muller, Tanvi Saxena, Ryan R. Posey, Priscilla Cheung, Taru Muranen, Yujing J. Heng, Joao A. Paulo, Craig B. Wilen, Frank J. Slack. Differences in syncytia formation by SARS-CoV-2 variants modify host chromatin accessibility and cellular senescence via TP53. Cell Reports 2023.
+
+Check out our bioRxiv preprint here:
 > Preprint: https://www.biorxiv.org/content/10.1101/2023.08.31.555625v1
 
 ## Abstract
