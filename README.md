@@ -13,3 +13,5 @@ COVID-19 remains a significant public health threat due to the ability of SARS-C
 ## Code information
 
 The available R markdown files contain R scripts used to generate figures and data tables corresponding with the current version of the manuscript. The code was last run 10/23/2023. 
+
+Each Rmd script is intended to be run separately. There may be additional files required for successful running not uploaded here. All files should be in the DATASETS/ folder, supplementary tables, or GEO (GSE241893). Additional information may be found in the STAR Methods section of our manuscript. 
