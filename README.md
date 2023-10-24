@@ -10,4 +10,4 @@ COVID-19 remains a significant public health threat due to the ability of SARS-C
 
 ## Code information
 
-The available R markdown files contain R scripts used to generate figures and data tables corresponding with the current version of the manuscript. The code was last run 7/21/2022. 
+The available R markdown files contain R scripts used to generate figures and data tables corresponding with the current version of the manuscript. The code was last run 10/23/2023. 
