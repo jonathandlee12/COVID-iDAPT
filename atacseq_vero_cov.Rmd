@@ -1,0 +1,73 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+```
+
+# Vero coronavirus ATAC-seq analysis
+
+```{r, eval=T}
+# read in ATAC-seq read pileups within peaks from bash
+atac_counts <- read.table(file="DATASETS/atacseq_vero_cov_counts.txt", header=T)
+
+# extract ATAC-seq library information
+sampleinfo <- data.frame(row.names=colnames(atac_counts),
+                         Group=str_replace_all(colnames(atac_counts), "Vero.", ""))
+sampleinfo$Group <- substr(sampleinfo$Group, 1, nchar(sampleinfo$Group)-2)
+sampleinfo$Group <- factor(sampleinfo$Group, level=c("Mock", "HKU5.SARS", "SARS2", "MERS"))
+levels(sampleinfo$Group) <- c("Mock", "HKU5-S1", "SARS2", "MERS")
+```
+
+```{r, eval=T}
+atac_dds <- DESeqDataSetFromMatrix(countData = atac_counts, colData = sampleinfo, design = ~Group)
+atac_dds <- estimateSizeFactors(atac_dds)
+```
+
+```{r, eval=T}
+atac_vst <- assay(varianceStabilizingTransformation(atac_dds))
+atac_pc <- prcomp(t(atac_vst))
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+# Figure 1C
+ggplot(data.frame(atac_pc$x, Sample=sampleinfo[colnames(atac_vst),"Group"]), aes(PC1, PC2)) + 
+  geom_point(aes(colour = Sample), size=3) + theme_classic() + xlab(paste0("ATAC-seq PC1 (", 100*summary(atac_pc)$importance[2,1], "% of variance)")) + ylab(paste0("ATAC-seq PC2 (", 100*summary(atac_pc)$importance[2,2], "% of variance)")) + geom_vline(xintercept=0, lty=3, color="red") + theme(legend.position="none")
+
+```
+
+```{r, eval=T}
+atac_dds <- DESeq(atac_dds)
+vero_sars1_results <- data.frame(lfcShrink(atac_dds, coef=2))
+vero_sars2_results <- data.frame(lfcShrink(atac_dds, coef=3))
+vero_mers_results <- data.frame(lfcShrink(atac_dds, coef=4))
+```
+
+```{r, eval=T}
+write.table(vero_sars2_results, file="vero_sars2.mock_atacseq.txt", sep='\t', quote=F)
+write.table(vero_sars1_results, file="vero_sars1.mock_atacseq.txt", sep='\t', quote=F)
+write.table(vero_mers_results, file="vero_mers.mock_atacseq.txt", sep='\t', quote=F)
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+# Figure 1B
+ggplot(vero_sars2_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(vero_sars2_results), padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(subset(vero_sars2_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(subset(vero_sars2_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-5,5)) + ylim(c(0,120)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq Log2 Fold Change,\nVero SARS2 vs. Mock Infection")
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+ggplot(vero_sars1_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(vero_sars1_results), padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(subset(vero_sars1_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(subset(vero_sars1_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-5,5)) + ylim(c(0,120)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq Log2 Fold Change,\nVero HKU5-S1 vs. Mock Infection")
+
+ggplot(vero_mers_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(vero_mers_results), padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(subset(vero_mers_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(subset(vero_mers_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-5,5)) + ylim(c(0,120)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq Log2 Fold Change,\nVero MERS vs. Mock Infection")
+```
+
+

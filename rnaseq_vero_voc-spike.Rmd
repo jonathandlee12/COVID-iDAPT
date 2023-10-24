@@ -1,0 +1,271 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(biomaRt)
+library(fgsea)
+library(viridis)
+library(tximport)
+library(qusage)
+
+```
+
+# Vero SARS-2 Spike RNA-seq analysis
+
+```{r, eval=T}
+# download salmon .sf files from https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE241891&format=file
+
+tx2gene <- getBM(attributes= c("ensembl_transcript_id","ensembl_gene_id", "external_gene_name"),
+                     mart = useDataset("csabaeus_gene_ensembl", useMart("ensembl")))
+
+## List all directories containing data  
+samples <- list.files(path = "DATASETS/RNASEQ", full.names = T)
+samples <- samples[grepl(".sf$", samples, perl=T) & grepl("vero", samples)]
+names(samples) <- c("Alpha_1", "Alpha_2",
+                    "Delta_1", "Delta_2",
+                    "EGFP_1", "EGFP_2",
+                    "Spike_1", "Spike_2")
+
+# Run tximport
+txi <- tximport(samples, type="salmon", tx2gene=tx2gene[,c("ensembl_transcript_id", "ensembl_gene_id")], countsFromAbundance="lengthScaledTPM", ignoreTxVersion = T)
+
+# create treatment sample matrix
+sampleinfo <- data.frame(Group = factor(c(rep("Alpha", 2), rep("Delta", 2), rep("EGFP", 2), rep("Spike", 2)), levels=c("EGFP", "Spike", "Alpha", "Delta")),
+                          row.names = names(samples))
+
+rnaseq_dds <- DESeqDataSetFromTximport(txi, colData = sampleinfo, design = ~Group)
+rnaseq_vst <- assay(varianceStabilizingTransformation(rnaseq_dds))
+```
+
+```{r, eval=T}
+rnaseq_dds <- estimateSizeFactors(rnaseq_dds)
+rnaseq_dds <- DESeq(rnaseq_dds)
+```
+
+```{r, eval=T}
+hs_genes <- getBM(attributes= c("entrezgene_id","ensembl_gene_id", "external_gene_name", "uniprotswissprot"),
+                     mart = useDataset("hsapiens_gene_ensembl", useMart("ensembl")))
+
+csab_genes <- tx2gene
+```
+
+```{r, eval=T}
+set.seed(1)
+spike.egfp_results <- results(rnaseq_dds, contrast=c("Group", "Spike", "EGFP"))
+spike.egfp_results <- data.frame(lfcShrink(rnaseq_dds, coef=2, res=spike.egfp_results))
+spike.egfp_results <- merge(spike.egfp_results, csab_genes[!duplicated(csab_genes[,2:3]),2:3], by.x=0, by.y=1)
+
+alpha.egfp_results <- results(rnaseq_dds, contrast=c("Group", "Alpha", "EGFP"))
+alpha.egfp_results <- data.frame(lfcShrink(rnaseq_dds, coef=3, res=alpha.egfp_results))
+alpha.egfp_results <- merge(alpha.egfp_results, csab_genes[!duplicated(csab_genes[,2:3]),2:3], by.x=0, by.y=1)
+
+delta.egfp_results <- results(rnaseq_dds, contrast=c("Group", "Delta", "EGFP"))
+delta.egfp_results <- data.frame(lfcShrink(rnaseq_dds, coef=4, res=delta.egfp_results))
+delta.egfp_results <- merge(delta.egfp_results, csab_genes[!duplicated(csab_genes[,2:3]),2:3], by.x=0, by.y=1)
+```
+
+```{r, eval=T}
+# from Fischer et al.
+p53_genes <- read.csv(file="DATASETS/41388_2017_BFonc2016502_MOESM7_ESM.csv")
+p53_genes <- list(p53_genes = intersect(p53_genes$Gene.Symbol, csab_genes$external_gene_name))
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+ggplot(spike.egfp_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(spike.egfp_results), padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(subset(spike.egfp_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(subset(spike.egfp_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + geom_point(pch=1, color="black", data=subset(subset(spike.egfp_results, external_gene_name %in% p53_genes$p53_genes & padj < 0.05))) + geom_point(pch=20, color="black", data=subset(subset(spike.egfp_results, external_gene_name %in%  c("CDKN1A", "BBC3") & padj < 0.05))) + geom_text_repel(size=3, aes(label=external_gene_name), data=subset(subset(spike.egfp_results, external_gene_name %in%  c("CDKN1A", "BBC3") & padj < 0.05))) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-10, 10)) + ylim(c(0,80)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("RNA-seq Log2 Fold Change,\nVero Spike vs. EGFP")
+
+ggplot(alpha.egfp_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(alpha.egfp_results), padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(subset(alpha.egfp_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(subset(alpha.egfp_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + geom_point(pch=1, color="black", data=subset(subset(alpha.egfp_results, external_gene_name %in% p53_genes$p53_genes & padj < 0.05))) + geom_point(pch=20, color="black", data=subset(subset(alpha.egfp_results, external_gene_name %in%  c("CDKN1A", "BBC3") & padj < 0.05))) + geom_text_repel(size=3, nudge_x = 0.8, nudge_y = 0.2, aes(label=external_gene_name), data=subset(subset(alpha.egfp_results, external_gene_name %in%  c("CDKN1A", "BBC3") & padj < 0.05))) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-10, 10)) + ylim(c(0,80)) +  
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("RNA-seq Log2 Fold Change,\nVero Alpha vs. EGFP")
+
+ggplot(delta.egfp_results, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(subset(delta.egfp_results), padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(subset(delta.egfp_results), padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(subset(delta.egfp_results), padj < 0.05 & log2FoldChange < 0), alpha=0.5) + geom_point(pch=1, color="black", data=subset(subset(delta.egfp_results, external_gene_name %in% p53_genes$p53_genes & padj < 0.05))) + geom_point(pch=20, color="black", data=subset(subset(delta.egfp_results, external_gene_name %in% c("CDKN1A", "BBC3") & padj < 0.05))) + geom_text_repel(size=3, nudge_x = 0.8, nudge_y = 0.2, aes(label=external_gene_name), data=subset(subset(delta.egfp_results, external_gene_name %in% c("CDKN1A", "BBC3") & padj < 0.05))) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-10, 10)) + ylim(c(0,80)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("RNA-seq Log2 Fold Change,\nVero Delta vs. EGFP")
+```
+
+```{r, eval=T}
+spike.egfp_ranks <- subset(spike.egfp_results, external_gene_name != "")$log2FoldChange
+names(spike.egfp_ranks) <- subset(spike.egfp_results, external_gene_name != "")$external_gene_name
+
+alpha.egfp_ranks <- subset(alpha.egfp_results, external_gene_name != "")$log2FoldChange
+names(alpha.egfp_ranks) <- subset(alpha.egfp_results, external_gene_name != "")$external_gene_name
+
+delta.egfp_ranks <- subset(delta.egfp_results, external_gene_name != "")$log2FoldChange
+names(delta.egfp_ranks) <- subset(delta.egfp_results, external_gene_name != "")$external_gene_name
+```
+
+```{r, eval=T}
+set.seed(1)
+fgsea_p53_spike.egfp <- fgsea(pathways=p53_genes, stats=spike.egfp_ranks)
+fgsea_p53_alpha.egfp <- fgsea(pathways=p53_genes, stats=alpha.egfp_ranks)
+fgsea_p53_delta.egfp <- fgsea(pathways=p53_genes, stats=delta.egfp_ranks)
+```
+
+```{r, eval=T}
+fgsea_p53_spike.egfp 
+fgsea_p53_alpha.egfp 
+fgsea_p53_delta.egfp 
+```
+
+```{r, eval=T}
+p53_enrichment <- data.frame(voc=factor(c("Spike", "Alpha", "Delta"), levels=rev(c("Spike", "Alpha", "Delta"))), 
+rbind(fgsea_p53_spike.egfp[,1:7], fgsea_p53_alpha.egfp[,1:7], fgsea_p53_delta.egfp[,1:7]))
+```
+
+```{r, eval=T, fig.width=2, fig.height=1.2}
+ggplot(p53_enrichment, aes(y = NES, x = voc)) +
+  geom_segment(yend=0, aes(xend=voc), lty=3) + theme_classic() + ylab("Normalized Enrichment Score\nTP53 Target Genes\nRNA-seq") + 
+  geom_point(aes(color=(pval)))  +
+  xlab("") + coord_flip() + 
+  theme(legend.position = "right", axis.text.y = element_text(vjust=0.5)) +
+  #scale_color_continuous(low="blue", high="red", name=expression("-Log"[10]*" p-value")) +
+  scale_color_continuous(low="red", high="blue", name="p-value", trans = "log",
+                         breaks=c(5e-2, 5e-5, 5e-8, 5e-11)) +
+  geom_hline(yintercept=0, lty=3) + ylim(c(-0.1,2.5))
+```
+
+```{r, eval=T, fig.width=1.3, fig.height=1.2}
+set.seed(1)
+plotEnrichment(pathway=p53_genes$p53_genes, spike.egfp_ranks[!is.na(spike.egfp_ranks)]) + xlab(paste0("Vero Spike vs. EGFP RNA-seq\np53 Target Genes\nFisher, Oncogene 2017\nNES = ", signif(subset(data.frame(fgsea_p53_spike.egfp [,1:7]), pathway=="p53_genes")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_p53_spike.egfp [,1:7]), pathway=="p53_genes")$pval, 3))) + ylab("Enrichment Score")
+
+plotEnrichment(pathway=p53_genes$p53_genes, alpha.egfp_ranks[!is.na(alpha.egfp_ranks)]) + xlab(paste0("Vero Alpha vs. EGFP RNA-seq\np53 Target Genes\nFisher, Oncogene 2017\nNES = ", signif(subset(data.frame(fgsea_p53_alpha.egfp [,1:7]), pathway=="p53_genes")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_p53_alpha.egfp [,1:7]), pathway=="p53_genes")$pval, 3))) + ylab("Enrichment Score")
+
+plotEnrichment(pathway=p53_genes$p53_genes, delta.egfp_ranks[!is.na(delta.egfp_ranks)]) + xlab(paste0("Vero Delta vs. EGFP RNA-seq\np53 Target Genes\nFisher, Oncogene 2017\nNES = ", signif(subset(data.frame(fgsea_p53_delta.egfp [,1:7]), pathway=="p53_genes")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_p53_delta.egfp [,1:7]), pathway=="p53_genes")$pval, 3))) + ylab("Enrichment Score")
+```
+
+```{r, eval=T}
+rnaseq_vst_heatmap <- rnaseq_vst
+colnames(rnaseq_vst_heatmap) <- sampleinfo[colnames(rnaseq_vst),1]
+rnaseq_vst_heatmap <- rnaseq_vst_heatmap[intersect(row.names(rnaseq_vst_heatmap), subset(csab_genes, external_gene_name %in% p53_genes$p53_genes)$ensembl_gene_id),]
+rnaseq_vst_heatmap <- rnaseq_vst_heatmap[,c(5,6,7,8,1,2,3,4)]
+
+rnaseq_vst_heatmap <- merge(rnaseq_vst_heatmap, csab_genes[!duplicated(csab_genes[,2:3]),2:3], by.x=0, by.y=1)
+row.names(rnaseq_vst_heatmap) <- rnaseq_vst_heatmap$external_gene_name
+rnaseq_vst_heatmap <- rnaseq_vst_heatmap[,-c(1,10)]
+colnames(rnaseq_vst_heatmap) <- c("EGFP 1", "EGFP 2",  "Spike 1",  "Spike 2",  "Alpha 1", "Alpha 2",  "Delta 1", "Delta 2")
+
+rnaseq_vst_heatmap <- rnaseq_vst_heatmap[,]
+```
+
+```{r, eval=T, fig.width=5, fig.height=1.8}
+sig_genes <- unique(c(subset(delta.egfp_results, padj < 0.05)$external_gene_name,
+         subset(alpha.egfp_results, padj < 0.05)$external_gene_name,
+         subset(spike.egfp_results, padj < 0.05)$external_gene_name))
+
+pheatmap(t(rnaseq_vst_heatmap[intersect(row.names(rnaseq_vst_heatmap),sig_genes),]), scale = "column", cluster_rows = F, fontsize_col = 7)
+```
+
+```{r, eval=T}
+# matching human genes to C. sabaeus genes
+spike.egfp_results_entrez <- merge(subset(spike.egfp_results, external_gene_name != ""), hs_genes[!duplicated(hs_genes[,c(1,3)]),c(1,3)], by="external_gene_name")
+
+alpha.egfp_results_entrez <- merge(subset(alpha.egfp_results, external_gene_name != ""), hs_genes[!duplicated(hs_genes[,c(1,3)]),c(1,3)], by="external_gene_name")
+
+delta.egfp_results_entrez <- merge(subset(delta.egfp_results, external_gene_name != ""), hs_genes[!duplicated(hs_genes[,c(1,3)]),c(1,3)], by="external_gene_name")
+```
+
+```{r, eval=T}
+spike.egfp_ranks_entrez <- sign(subset(spike.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$log2FoldChange) * -log10(subset(spike.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$padj)
+names(spike.egfp_ranks_entrez) <- subset(spike.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$entrezgene_id
+
+alpha.egfp_ranks_entrez <- sign(subset(alpha.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$log2FoldChange) * 
+  -log10(subset(alpha.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$padj)
+names(alpha.egfp_ranks_entrez) <- subset(alpha.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$entrezgene_id
+
+delta.egfp_ranks_entrez <- sign(subset(delta.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$log2FoldChange) * 
+  -log10(subset(delta.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$padj)
+names(delta.egfp_ranks_entrez) <- subset(delta.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$entrezgene_id
+```
+
+
+```{r, eval=T}
+spike.egfp_ranks_entrez <- (subset(spike.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$log2FoldChange)
+names(spike.egfp_ranks_entrez) <- subset(spike.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$entrezgene_id
+
+alpha.egfp_ranks_entrez <- (subset(alpha.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$log2FoldChange)
+names(alpha.egfp_ranks_entrez) <- subset(alpha.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$entrezgene_id
+
+delta.egfp_ranks_entrez <- (subset(delta.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$log2FoldChange)
+names(delta.egfp_ranks_entrez) <- subset(delta.egfp_results_entrez, entrezgene_id != "" & padj <= 1)$entrezgene_id
+```
+
+```{r, eval=T}
+msigdb_c2 <- read.gmt(file="DATASETS/c2.all.v7.5.1.entrez.gmt")
+```
+
+```{r, eval=T}
+set.seed(1)
+fgsea_msigdb_spike <- fgsea(pathways=msigdb_c2, 
+                   stats=spike.egfp_ranks_entrez, 
+                   minSize = 5,
+                   nperm=10000)
+fgsea_msigdb_spike <- fgsea_msigdb_spike[order(fgsea_msigdb_spike$NES),]
+fgsea_msigdb_spike$pathway <- factor(fgsea_msigdb_spike$pathway, levels=unique(fgsea_msigdb_spike$pathway))
+
+fgsea_msigdb_alpha <- fgsea(pathways=msigdb_c2, 
+                   stats=alpha.egfp_ranks_entrez, 
+                   minSize = 5,
+                   nperm=10000)
+fgsea_msigdb_alpha <- fgsea_msigdb_alpha[order(fgsea_msigdb_alpha$NES),]
+fgsea_msigdb_alpha$pathway <- factor(fgsea_msigdb_alpha$pathway, levels=unique(fgsea_msigdb_alpha$pathway))
+
+fgsea_msigdb_delta <- fgsea(pathways=msigdb_c2, 
+                   stats=delta.egfp_ranks_entrez, 
+                   minSize = 5,
+                   nperm=10000)
+fgsea_msigdb_delta <- fgsea_msigdb_delta[order(fgsea_msigdb_delta$NES),]
+fgsea_msigdb_delta$pathway <- factor(fgsea_msigdb_delta$pathway, levels=unique(fgsea_msigdb_delta$pathway))
+```
+
+
+```{r, eval=T}
+msigdb_common_pathways <- unique(c(as.character(subset(fgsea_msigdb_spike, padj < 0.05)$pathway),
+                                as.character(subset(fgsea_msigdb_alpha, padj < 0.05)$pathway),
+                                as.character(subset(fgsea_msigdb_delta, padj < 0.05)$pathway)))
+
+fgsea_msigdb_common <- data.frame()
+fgsea_msigdb_common <- rbind(fgsea_msigdb_common, 
+                           cbind(subset(data.frame(fgsea_msigdb_spike), pathway %in% msigdb_common_pathways)[,c(1,3,5)], Condition = "Spike"))
+fgsea_msigdb_common <- rbind(fgsea_msigdb_common, 
+                           cbind(subset(data.frame(fgsea_msigdb_alpha), pathway %in% msigdb_common_pathways)[,c(1,3,5)], Condition = "Alpha"),
+                           cbind(subset(data.frame(fgsea_msigdb_delta), pathway %in% msigdb_common_pathways)[,c(1,3,5)], Condition = "Delta")) 
+
+fgsea_msigdb_common$Condition <- factor(fgsea_msigdb_common$Condition, levels = c("Spike", "Alpha", "Delta"))
+
+fgsea_msigdb_common$pathway <- factor(fgsea_msigdb_common$pathway, levels=subset(fgsea_msigdb_common, Condition=="Delta")$pathway[order(-log10(subset(fgsea_msigdb_common, Condition=="Delta")$padj) * sign(subset(fgsea_msigdb_common, Condition=="Delta")$NES))])
+```
+
+```{r, eval=T, fig.width=4, fig.height=2.5}
+msigdb_pathways <- c("PEREZ_TP53_TARGETS",
+                     "FISCHER_DIRECT_P53_TARGETS_META_ANALYSIS",
+                     "GHANDI_DIRECT_IRRADIATION_UP",
+                     "PHONG_TNF_TARGETS_UP",
+                     "SEKI_INFLAMMATORY_RESPONSE_LPS_UP",
+                     "SMIRNOV_RESPONSE_TO_IR_6HR_UP",
+                     "ZHOU_CELL_CYCLE_GENES_IN_IR_RESPONSE_24HR",
+                     "REACTOME_CELL_CYCLE_MITOTIC",
+                     "REACTOME_RESOLUTION_OF_SISTER_CHROMATID_COHESION",
+                     "WHITFIELD_CELL_CYCLE_G1_S",
+                     "WHITFIELD_CELL_CYCLE_G2_M",
+                     "KEGG_DNA_REPLICATION",
+                     "FISCHER_G2_M_CELL_CYCLE",
+                     "REACTOME_CELL_CYCLE_CHECKPOINTS",
+                     "TANG_SENESCENCE_TP53_TARGETS_DN",
+                     "FISCHER_G1_S_CELL_CYCLE",
+                     "SCIAN_CELL_CYCLE_TARGETS_OF_TP53_AND_TP73_DN",
+                     "WU_APOPTOSIS_BY_CDKN1A_VIA_TP53")
+
+ggplot(subset(fgsea_msigdb_common, pathway %in% msigdb_pathways), aes(y = sign(NES)*-log10(padj), x = pathway, fill = Condition)) +
+  geom_bar(stat="identity", position="dodge") + coord_flip() + theme_classic() +  geom_hline(yintercept=c(log10(0.05), -log10(0.05)), lty=3, color="red") + geom_hline(yintercept=0, lty=3, color="black") + xlab("MSigDB Pathways") + ylab("Signed -Log10 FDR, GSEA")
+```
+
+
+
+

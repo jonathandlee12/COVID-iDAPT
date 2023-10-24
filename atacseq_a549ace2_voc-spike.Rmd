@@ -1,0 +1,88 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+```
+
+# A549ACE2 VOC spike ATAC-seq analysis
+
+```{r, eval=T}
+# read in ATAC-seq read pileups within peaks from bash
+atac_counts <- read.table(file="DATASETS/atacseq_a549ace2_voc_spike_counts.txt", header=T)
+
+# read in ATAC-seq library information
+sampleinfo <- data.frame(row.names = colnames(atac_counts),
+                         Group = unlist(strsplit(colnames(atac_counts), "[.]"))[c(F,F,T,F)],
+                         Geno = unlist(strsplit(colnames(atac_counts), "[.]"))[c(F,T,F,F)])
+sampleinfo$Sample <- paste(sampleinfo$Group, sampleinfo$Geno)
+```
+
+```{r, eval=T}
+set.seed(1)
+atac_dds <- DESeqDataSetFromMatrix(countData = atac_counts, colData = sampleinfo, design = ~Sample)
+atac_dds$Sample <- relevel(atac_dds$Sample, "EGFP WT")
+atac_dds <- DESeq(atac_dds)
+
+atac_results_spike <- data.frame(lfcShrink(dds=atac_dds, coef=6))
+atac_results_delta <- data.frame(lfcShrink(dds=atac_dds, coef=3))
+
+atac_dds_ko <- DESeqDataSetFromMatrix(countData = atac_counts, colData = sampleinfo, design = ~Sample)
+atac_dds_ko$Sample <- relevel(atac_dds_ko$Sample, "EGFP KO")
+atac_dds_ko <- DESeq(atac_dds_ko)
+
+atac_results_spike_ko <- data.frame(lfcShrink(dds=atac_dds_ko, coef=5))
+atac_results_delta_ko <- data.frame(lfcShrink(dds=atac_dds_ko, coef=2))
+```
+
+```{r, eval=T, fig.width=1.1, fig.height=1.5}
+ggplot(atac_results_spike, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(atac_results_spike, padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(atac_results_spike, padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(atac_results_spike, padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-4.5,4.5)) + ylim(c(0,15)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq, A549ACE2\nLog2 Fold Change\nSpike vs. EGFP")
+
+ggplot(atac_results_delta, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(atac_results_delta, padj > 0.05)) + geom_point(pch=20, color="indianred", data=subset(atac_results_delta, padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(atac_results_delta, padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-4.5,4.5)) + ylim(c(0,15)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("ATAC-seq, A549ACE2\nLog2 Fold Change\nDelta vs. EGFP")
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+ggplot(atac_results_spike_ko, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(atac_results_spike_ko, padj > 0.05)) + geom_point(pch=20, color="skyblue", data=subset(atac_results_spike_ko, padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="indianred", data=subset(atac_results_spike_ko, padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-6,6)) + ylim(c(0,15)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("Log2 Fold Change,\nA549ACE2 TP53ko\nSpike vs. EGFP ATAC-seq")
+
+ggplot(atac_results_delta_ko, aes(x=log2FoldChange, y=-log10(padj))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(atac_results_delta_ko, padj > 0.05)) + geom_point(pch=20, color="skyblue", data=subset(atac_results_delta_ko, padj < 0.05 & log2FoldChange > 0), alpha=0.5) + geom_point(pch=20, color="indianred", data=subset(atac_results_delta_ko, padj < 0.05 & log2FoldChange < 0), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) + xlim(c(-6,6)) + ylim(c(0,15)) + 
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("Log2 Fold Change,\nA549ACE2 TP53ko\nDelta vs. EGFP ATAC-seq")
+```
+
+```{r, eval=T}
+atac_sigpeaks <- data.frame(
+  group = c("Spike", "Spike", "Delta", "Delta", "Spike KO", "Spike KO", "Delta KO", "Delta KO"),
+  sigpeaks = c(-dim(subset(atac_results_spike, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(atac_results_spike, padj < 0.05 & log2FoldChange > 0))[1],
+               -dim(subset(atac_results_delta, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(atac_results_delta, padj < 0.05 & log2FoldChange > 0))[1],
+               -dim(subset(atac_results_spike_ko, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(atac_results_spike_ko, padj < 0.05 & log2FoldChange > 0))[1],
+               -dim(subset(atac_results_delta_ko, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(atac_results_delta_ko, padj < 0.05 & log2FoldChange > 0))[1]),
+  sign = rep(c("neg", "pos"), 4)
+)
+
+atac_sigpeaks$group <- factor(atac_sigpeaks$group, levels=unique(atac_sigpeaks$group))
+```
+
+```{r, eval=T, fig.width=.6, fig.height=1.5}
+ggplot(atac_sigpeaks, aes(x=group, y=sigpeaks, color=sign, pch=sign)) + geom_point() + ylim(c(-6000, 6000)) + theme_classic() + geom_hline(yintercept=0) + scale_color_manual(values=c("red", "black")) + scale_shape_manual(values=c(1, 2)) + theme(legend.position="none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("# Significant ATAC-seq Peaks") + xlab("")
+```
+
+```{r, eval=T}
+write.table(atac_results_spike, file="atac_a549ace2_spike.txt", sep='\t', quote=F)
+write.table(atac_results_delta, file="atac_a549ace2_delta.txt", sep='\t', quote=F)
+write.table(atac_results_spike_ko, file="atac_a549ace2_ko_spike.txt", sep='\t', quote=F)
+write.table(atac_results_delta_ko, file="atac_a549ace2_ko_delta.txt", sep='\t', quote=F)
+```
+

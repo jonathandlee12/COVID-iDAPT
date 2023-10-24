@@ -1,0 +1,168 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(biomaRt)
+library(fgsea)
+library(viridis)
+library(tximport)
+library(qusage)
+```
+
+# A549ACE2 SARS-2 Spike RNA-seq analysis
+
+```{r, eval=T}
+# download salmon .sf files from https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE241891&format=file
+
+tx2gene <- getBM(attributes= c("ensembl_transcript_id","ensembl_gene_id", "external_gene_name"),
+                     mart = useDataset("hsapiens_gene_ensembl", useMart("ensembl")))
+
+## List all directories containing data  
+samples <- list.files(path = "DATASETS/RNASEQ", full.names = T)
+samples <- samples[grepl(".sf$", samples, perl=T) & grepl("A549", samples)]
+names(samples) <- c("WT_Delta_1", "WT_Delta_2",
+                    "WT_EGFP_1", "WT_EGFP_2",
+                    "KO_Delta_1", "KO_Delta_2",
+                    "KO_EGFP_1", "KO_EGFP_2",
+                    "KO_Spike_1", "KO_Spike_2",
+                    "WT_Spike_1", "WT_Spike_2")
+
+sampleinfo <- data.frame(Group = unlist(strsplit(names(samples), "_"))[c(F,T,F)],
+                           Genotype = unlist(strsplit(names(samples), "_"))[c(T,F,F)],
+                         row.names = names(samples))
+sampleinfo$Sample <- paste(sampleinfo$Group, sampleinfo$Genotype)
+
+# Run tximport
+txi <- tximport(samples, type="salmon", tx2gene=tx2gene[,c("ensembl_transcript_id", "ensembl_gene_id")], countsFromAbundance="lengthScaledTPM", ignoreTxVersion = T)
+```
+
+```{r, eval=T}
+set.seed(1)
+rnaseq_dds <- DESeqDataSetFromTximport(txi, colData = sampleinfo, design = ~Sample)
+rnaseq_dds$Sample <- relevel(rnaseq_dds$Sample, "EGFP WT")
+rnaseq_dds <- DESeq(rnaseq_dds)
+
+rnaseq_results_spike <- data.frame(lfcShrink(dds=rnaseq_dds, coef=6))
+rnaseq_results_delta <- data.frame(lfcShrink(dds=rnaseq_dds, coef=3))
+
+rnaseq_dds_ko <- DESeqDataSetFromTximport(txi, colData = sampleinfo, design = ~Sample)
+rnaseq_dds_ko$Sample <- relevel(rnaseq_dds_ko$Sample, "EGFP KO")
+rnaseq_dds_ko <- DESeq(rnaseq_dds_ko)
+
+rnaseq_results_spike_ko <- data.frame(lfcShrink(dds=rnaseq_dds_ko, coef=5))
+rnaseq_results_delta_ko <- data.frame(lfcShrink(dds=rnaseq_dds_ko, coef=2))
+```
+
+```{r, eval=T}
+hs_genes <- getBM(attributes= c("entrezgene_id","ensembl_gene_id", "external_gene_name"),
+                     mart = useDataset("hsapiens_gene_ensembl", useMart("ensembl")))
+```
+
+```{r, eval=T}
+rnaseq_results_spike <- merge(rnaseq_results_spike, hs_genes, by.x=0, by.y="ensembl_gene_id")
+rnaseq_results_delta <- merge(rnaseq_results_delta, hs_genes, by.x=0, by.y="ensembl_gene_id")
+rnaseq_results_spike_ko <- merge(rnaseq_results_spike_ko, hs_genes, by.x=0, by.y="ensembl_gene_id")
+rnaseq_results_delta_ko <- merge(rnaseq_results_delta_ko, hs_genes, by.x=0, by.y="ensembl_gene_id")
+```
+
+```{r, eval=T}
+rnaseq_ranks_spike <- subset(rnaseq_results_spike, padj <= 1)$log2FoldChange
+names(rnaseq_ranks_spike) <- subset(rnaseq_results_spike, padj <= 1)$entrezgene_id
+
+rnaseq_ranks_delta <- subset(rnaseq_results_delta, padj <= 1)$log2FoldChange
+names(rnaseq_ranks_delta) <- subset(rnaseq_results_delta, padj <= 1)$entrezgene_id
+
+rnaseq_ranks_spike_ko <- subset(rnaseq_results_spike_ko, padj <= 1)$log2FoldChange
+names(rnaseq_ranks_spike_ko) <- subset(rnaseq_results_spike_ko, padj <= 1)$entrezgene_id
+
+rnaseq_ranks_delta_ko <- subset(rnaseq_results_delta_ko, padj <= 1)$log2FoldChange
+names(rnaseq_ranks_delta_ko) <- subset(rnaseq_results_delta_ko, padj <= 1)$entrezgene_id
+```
+
+```{r, eval=T}
+msigdb_c2 <- read.gmt(file="DATASETS/c2.all.v7.5.1.entrez.gmt")
+```
+
+```{r, eval=T}
+set.seed(2)
+fgsea_msigdb_spike <- fgsea(pathways=msigdb_c2, 
+                   stats=rnaseq_ranks_spike, 
+                   minSize = 10)
+fgsea_msigdb_spike <- fgsea_msigdb_spike[order(fgsea_msigdb_spike$NES),]
+fgsea_msigdb_spike$pathway <- factor(fgsea_msigdb_spike$pathway, levels=unique(fgsea_msigdb_spike$pathway))
+
+fgsea_msigdb_delta <- fgsea(pathways=msigdb_c2, 
+                   stats=rnaseq_ranks_delta, 
+                   minSize = 10)
+fgsea_msigdb_delta <- fgsea_msigdb_delta[order(fgsea_msigdb_delta$NES),]
+fgsea_msigdb_delta$pathway <- factor(fgsea_msigdb_delta$pathway, levels=unique(fgsea_msigdb_delta$pathway))
+
+fgsea_msigdb_spike_ko <- fgsea(pathways=msigdb_c2, 
+                   stats=rnaseq_ranks_spike_ko, 
+                   minSize = 10)
+fgsea_msigdb_spike_ko <- fgsea_msigdb_spike_ko[order(fgsea_msigdb_spike_ko$NES),]
+fgsea_msigdb_spike_ko$pathway <- factor(fgsea_msigdb_spike_ko$pathway, levels=unique(fgsea_msigdb_spike_ko$pathway))
+
+fgsea_msigdb_delta_ko <- fgsea(pathways=msigdb_c2, 
+                   stats=rnaseq_ranks_delta_ko, 
+                   minSize = 10)
+fgsea_msigdb_delta_ko <- fgsea_msigdb_delta_ko[order(fgsea_msigdb_delta_ko$NES),]
+fgsea_msigdb_delta_ko$pathway <- factor(fgsea_msigdb_delta_ko$pathway, levels=unique(fgsea_msigdb_delta_ko$pathway))
+
+```
+
+
+```{r, eval=T}
+msigdb_common_pathways <- setdiff(setdiff(c(as.character(subset(fgsea_msigdb_delta, padj < 0.05)$pathway),
+                                            as.character(subset(fgsea_msigdb_spike, padj < 0.05)$pathway)),
+                                as.character(subset(fgsea_msigdb_delta_ko, padj < 0.05)$pathway)),
+                                as.character(subset(fgsea_msigdb_spike_ko, padj < 0.05)$pathway))
+
+fgsea_msigdb_common <- data.frame()
+fgsea_msigdb_common <- rbind(fgsea_msigdb_common, 
+                           cbind(subset(data.frame(fgsea_msigdb_spike), pathway %in% msigdb_common_pathways)[,c(1,3,6)], Condition = "Spike"),
+                           cbind(subset(data.frame(fgsea_msigdb_delta), pathway %in% msigdb_common_pathways)[,c(1,3,6)], Condition = "Delta"),
+                           cbind(subset(data.frame(fgsea_msigdb_spike_ko), pathway %in% msigdb_common_pathways)[,c(1,3,6)], Condition = "Spike KO"),
+                           cbind(subset(data.frame(fgsea_msigdb_delta_ko), pathway %in% msigdb_common_pathways)[,c(1,3,6)], Condition = "Delta KO")) 
+
+fgsea_msigdb_common$Condition <- factor(fgsea_msigdb_common$Condition, levels = c("Spike", "Delta", "Spike KO", "Delta KO"))
+
+fgsea_msigdb_common$pathway <- factor(fgsea_msigdb_common$pathway, levels=subset(fgsea_msigdb_common, Condition=="Delta")$pathway[order(-log10(subset(fgsea_msigdb_common, Condition=="Delta")$padj) * sign(subset(fgsea_msigdb_common, Condition=="Delta")$NES))])
+```
+
+```{r, eval=T, fig.width=3.5, fig.height=1.5}
+msigdb_pathways <- c("PEREZ_TP53_TARGETS",
+                     "FISCHER_DIRECT_P53_TARGETS_META_ANALYSIS",
+                     "GHANDI_DIRECT_IRRADIATION_UP",
+                     "PHONG_TNF_TARGETS_UP",
+                     "SEKI_INFLAMMATORY_RESPONSE_LPS_UP",
+                     "SMIRNOV_RESPONSE_TO_IR_6HR_UP",
+                     "ZHOU_CELL_CYCLE_GENES_IN_IR_RESPONSE_24HR",
+                     "REACTOME_CELL_CYCLE_MITOTIC",
+                     "REACTOME_RESOLUTION_OF_SISTER_CHROMATID_COHESION",
+                     "WHITFIELD_CELL_CYCLE_G1_S",
+                     "WHITFIELD_CELL_CYCLE_G2_M",
+                     "KEGG_DNA_REPLICATION",
+                     "FISCHER_G2_M_CELL_CYCLE",
+                     "REACTOME_CELL_CYCLE_CHECKPOINTS",
+                     "TANG_SENESCENCE_TP53_TARGETS_DN",
+                     "FISCHER_G1_S_CELL_CYCLE",
+                     "SCIAN_CELL_CYCLE_TARGETS_OF_TP53_AND_TP73_DN",
+                     "WU_APOPTOSIS_BY_CDKN1A_VIA_TP53")
+
+ggplot(subset(fgsea_msigdb_common, pathway %in% msigdb_pathways), aes(y = sign(NES)*-log10(padj), x = pathway, fill = Condition)) +
+  geom_bar(stat="identity", position="dodge") + coord_flip() + theme_classic() +  geom_hline(yintercept=c(log10(0.05), -log10(0.05)), lty=3, color="red") + geom_hline(yintercept=0, lty=3, color="black") + xlab("MSigDB Pathways") + ylab("Signed -Log10 FDR, GSEA")
+```
+
+
+
+

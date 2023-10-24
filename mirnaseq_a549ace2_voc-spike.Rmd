@@ -1,0 +1,131 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(biomaRt)
+library(fgsea)
+library(viridis)
+library(tximport)
+library(qusage)
+```
+
+# A549ACE2 SARS-2 Spike Small RNA-seq analysis
+
+```{r, eval=T}
+# https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE241890&format=file
+
+f <- list.files(path="DATASETS/MIRNASEQ", full.names = T, pattern="mature.counts.txt$")[1]
+mirna_counts <- read.table(file=f, sep='\t', header=F)[,c(1,3)]
+colnames(mirna_counts) <- c("Gene", str_replace_all(str_replace_all(f, "DATASETS/MIRNASEQ/", ""), "_mature.counts.txt", ""))
+
+for(f in list.files(path="DATASETS/MIRNASEQ", full.names = T, pattern="mature.counts.txt$")[-1]){
+  tmp <- read.table(file=f, sep='\t', header=F)
+  colnames(tmp)[3] <- str_replace_all(str_replace_all(f, "DATASETS/MIRNASEQ/", ""), "_mature.counts.txt", "")
+  mirna_counts <- merge(mirna_counts, tmp[,c(1,3)], by=1)
+}
+
+row.names(mirna_counts) <- mirna_counts[,1]
+mirna_counts <- mirna_counts[,-1]
+
+colnames(mirna_counts) <- c("WT_Delta_1", "WT_Delta_2",
+                    "WT_EGFP_1", "WT_EGFP_2",
+                    "KO_Delta_1", "KO_Delta_2",
+                    "KO_EGFP_1", "KO_EGFP_2",
+                    "KO_Spike_1", "KO_Spike_2",
+                    "WT_Spike_1", "WT_Spike_2")
+```
+
+```{r, eval=T}
+sampleinfo <- data.frame(Group = unlist(strsplit(colnames(mirna_counts), "_"))[c(F,T,F)],
+                           Genotype = unlist(strsplit(colnames(mirna_counts), "_"))[c(T,F,F)],
+                         row.names = colnames(mirna_counts))
+sampleinfo$Sample <- paste(sampleinfo$Group, sampleinfo$Genotype)
+```
+  
+```{r, eval=T}
+mirna_dds <- DESeqDataSetFromMatrix(countData = mirna_counts, colData = sampleinfo, design = ~Sample)
+mirna_dds <- estimateSizeFactors(mirna_dds)
+```
+
+```{r, eval=T}
+sample_order <- c("WT_EGFP_1", "WT_EGFP_2", "WT_Spike_1", "WT_Spike_2", "WT_Delta_1", "WT_Delta_2", 
+                  "KO_EGFP_1", "KO_EGFP_2", "KO_Spike_1", "KO_Spike_2", "KO_Delta_1", "KO_Delta_2")
+mirna_vst <- assay(varianceStabilizingTransformation(mirna_dds[,sample_order]))
+```
+
+```{r, eval=T}
+set.seed(1)
+mirna_dds$Sample <- relevel(mirna_dds$Sample, "EGFP WT")
+mirna_dds <- DESeq(mirna_dds)
+mirna_results_spike <- data.frame(lfcShrink(dds=mirna_dds, coef=6))
+mirna_results_delta <- data.frame(lfcShrink(dds=mirna_dds, coef=3))
+
+mirna_results_spike$Gene = row.names(mirna_results_spike)
+mirna_results_delta$Gene = row.names(mirna_results_delta)
+
+mirna_dds$Sample <- relevel(mirna_dds$Sample, "EGFP KO")
+mirna_dds_ko <- DESeq(mirna_dds)
+
+mirna_results_spike_ko <- data.frame(lfcShrink(dds=mirna_dds_ko, coef=5))
+mirna_results_delta_ko <- data.frame(lfcShrink(dds=mirna_dds_ko, coef=3))
+
+mirna_results_spike_ko$Gene = row.names(mirna_results_spike_ko)
+mirna_results_delta_ko$Gene = row.names(mirna_results_delta_ko)
+```
+
+```{r, eval=T}
+p53_mirnas <- setdiff(c(row.names(subset(mirna_results_spike, padj < 0.05 & baseMean > 10)),
+row.names(subset(mirna_results_delta, padj < 0.05 & baseMean > 10))),
+c(row.names(subset(mirna_results_delta_ko, padj < 0.05)),
+row.names(subset(mirna_results_spike_ko, padj < 0.05))))
+```
+
+```{r, eval=T, fig.width=4, fig.height=2.5}
+pheatmap(t(mirna_vst[p53_mirnas,]), scale="column", cluster_cols=T, cluster_rows=F,treeheight_col	=0,
+         #annotation_row=annotation_row, annotation_colors = anno_colors,
+         cellwidth=10, cellheight=10, fontsize=10,
+         gaps_row = 6, #gaps_row = 1, 
+         color = c(colorRampPalette(c("blue", "white", "white", "red"))(8)), #gaps_col = 4, gaps_row = 1,
+         breaks = seq(-2, 2, 0.5), show_tree=F)
+```
+
+```{r, eval=T}
+mirna_sigpeaks <- data.frame(
+  group = c("Spike", "Spike", "Delta", "Delta", "Spike KO", "Spike KO", "Delta KO", "Delta KO"),
+  sigpeaks = c(-dim(subset(mirna_results_spike, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(mirna_results_spike, padj < 0.05 & log2FoldChange > 0))[1],
+               -dim(subset(mirna_results_delta, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(mirna_results_delta, padj < 0.05 & log2FoldChange > 0))[1],
+               -dim(subset(mirna_results_spike_ko, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(mirna_results_spike_ko, padj < 0.05 & log2FoldChange > 0))[1],
+               -dim(subset(mirna_results_delta_ko, padj < 0.05 & log2FoldChange < -0))[1],
+               dim(subset(mirna_results_delta_ko, padj < 0.05 & log2FoldChange > 0))[1]),
+  sign = rep(c("neg", "pos"), 4)
+)
+
+mirna_sigpeaks$group <- factor(mirna_sigpeaks$group, levels=unique(mirna_sigpeaks$group))
+```
+
+```{r, eval=T, fig.width=0.6, fig.height=1.5}
+ggplot(mirna_sigpeaks, aes(x=group, y=sigpeaks, color=sign, pch=sign)) + geom_point() + #ylim(c(-500, 500)) + 
+  theme_classic() + geom_hline(yintercept=0) + scale_color_manual(values=c("red", "black")) + scale_shape_manual(values=c(1, 2)) + theme(legend.position="none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("# Significant miRNAs\n(vs. EGFP)") + xlab("")
+```
+
+```{r, eval=T}
+write.table(mirna_results_spike, file="mirna_results_spike.txt", sep='\t', quote=F, row.names=F)
+write.table(mirna_results_delta, file="mirna_results_delta.txt", sep='\t', quote=F, row.names=F)
+write.table(mirna_results_spike_ko, file="mirna_results_spike_ko.txt", sep='\t', quote=F, row.names=F)
+write.table(mirna_results_delta_ko, file="mirna_results_delta_ko.txt", sep='\t', quote=F, row.names=F)
+```
+
+
+

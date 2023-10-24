@@ -1,0 +1,374 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(limma)
+library(biomaRt)
+library(fgsea)
+library(viridis)
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+```
+
+# Vero coronavirus iDAPT-MS analysis
+
+```{r, eval=T, fig.width=2.5, fig.height=2}
+# In Table S1
+tmt_peptides <- read.csv(file="DATASETS/idapt-ms_vero_cov_psms.csv", header=T)
+
+tmt_peptides$GeneSymbol <- as.character(tmt_peptides$GeneSymbol)
+tmt_peptides$GeneSymbol[which(grepl("-Mar", tmt_peptides$GeneSymbol))] <- paste0("MARCH", str_replace(tmt_peptides$GeneSymbol[which(grepl("-Mar", tmt_peptides$GeneSymbol))], "-.*", ""))
+tmt_peptides$GeneSymbol[which(grepl("-Sep", tmt_peptides$GeneSymbol))] <- paste0("SEPT", str_replace(tmt_peptides$GeneSymbol[which(grepl("-Sep", tmt_peptides$GeneSymbol))], "-.*", ""))
+
+tmt_peptides <- data.frame(ProteinId=tmt_peptides[,c(1)], GeneSymbol=tmt_peptides[,2], GroupId=tmt_peptides[,c(4)], Unique.Razor=tmt_peptides[,c(7)], tmt_peptides[,c(8:23)])
+
+colnames(tmt_peptides)[c(5:20)] <- c(paste0("Mock_T_", 1:2), 
+                                           paste0("Mock_TP_", 1:2), 
+                                           paste0("HKU5-SARS_T_", 1:2), 
+                                           paste0("HKU5-SARS_TP_", 1:2), 
+                                           paste0("SARS2_T_", 1:2), 
+                                           paste0("SARS2_TP_", 1:2),
+                                           paste0("MERS_T_", 1:2), 
+                                           paste0("MERS_TP_", 1:2))
+```
+
+# first perform no normalization to identify and exclude background signal in T-labeled samples (vs. TP)
+
+```{r, eval=T}
+normalization <- rep(1, 16)
+tmt_peptides_norm <- data.frame(tmt_peptides[,c(1:4)], log2(sweep(tmt_peptides[,-c(1:4)], 2, normalization, "/")+1))
+
+# need to collapse peptides into proteins and/or protein groups...
+# two steps:
+# first, collapse proteins with unique peptides only
+# second, collapse protein groups with more than one protein
+# use average to collapse peptides in the normalized log2 setting
+tmt_proteins_norm <- subset(tmt_peptides_norm, Unique.Razor=="U")[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame() 
+tmt_proteins_norm <- rbind(tmt_proteins_norm,
+             subset(tmt_peptides_norm, !(ProteinId %in% tmt_proteins_norm$ProteinId))[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame()) 
+
+tmt_proteins_norm <- merge(tmt_proteins_norm, unique(tmt_peptides_norm[,1:2]), by.x=1, by.y=1)
+row.names(tmt_proteins_norm) <- tmt_proteins_norm$ProteinId
+
+tmt_proteins_norm$uniprot <- unlist(strsplit(tmt_proteins_norm$ProteinId, "|", fixed=T))[seq(2, length(tmt_proteins_norm$ProteinId)*3, 3)]
+tmt_proteins_norm$uniprot <- str_replace_all(tmt_proteins_norm$uniprot, "-.*", "")
+
+tmt_proteins_norm <- tmt_proteins_norm[,c(1,18,19,2:17)]
+
+# limma
+TS <- factor(c(rep("mock",4), rep("sars1",4), rep("sars2",4), rep("mers",4)))
+ctrl <- factor(rep(c("_T", "_T", "_TP", "_TP"), 4))
+TS <- factor(paste0(TS, ctrl))
+design <- model.matrix(~0 + TS)
+colnames(design) <- c(levels(TS))
+fit <- lmFit(tmt_proteins_norm[,4:19], design)
+
+cont.matrix <- makeContrasts(
+  mock = mock_TP - mock_T,
+  sars1 = sars1_TP - sars1_T,
+  sars2 = sars2_TP - sars2_T,
+  mers = mers_TP - mers_T,
+  levels = design)
+fit.adj <- contrasts.fit(fit, cont.matrix)
+fit.adj <- eBayes(fit.adj) #, trend=T, robust=T)
+
+vero_mock <- topTable(fit.adj, number=100000, coef = "mock", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_mock <- merge(tmt_proteins_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_mock, by.x=1, by.y=0)
+
+vero_sars1 <- topTable(fit.adj, number=100000, coef = "sars1", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_sars1 <- merge(tmt_proteins_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_sars1, by.x=1, by.y=0)
+
+vero_sars2 <- topTable(fit.adj, number=100000, coef = "sars2", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_sars2 <- merge(tmt_proteins_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_sars2, by.x=1, by.y=0)
+
+vero_mers <- topTable(fit.adj, number=100000, coef = "mers", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_mers <- merge(tmt_proteins_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_mers, by.x=1, by.y=0)
+
+```
+
+
+```{r, eval=T}
+csab_genes <- getBM(attributes= c("entrezgene_id","ensembl_gene_id", "external_gene_name"),
+                     mart = useDataset("csabaeus_gene_ensembl", useMart("ensembl")))
+```
+
+```{r, eval=T}
+load("DATASETS/csab_cisbp_pwms.rda")
+
+tf_motifs <- list(pwms = unique(subset(csab_genes, ensembl_gene_id %in% names(csab_cisbp_pwms) & external_gene_name != "")$external_gene_name))
+
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+lfc_cutoffs <- c()
+
+for(df in list(vero_mock, vero_sars1, vero_sars2, vero_mers)){
+  lfc_cutoff <- seq(-2, 10, 0.01)
+  roc_lr <- NULL
+  for(lfc in lfc_cutoff){
+    roc_lr <- rbind(roc_lr,
+               c(length(subset(df, (grepl("contaminant", ProteinId) | GeneSymbol %in% c("ACACA", "PC", "PCCA", "PCCB", "MCCC1", "MCCC2")) & logFC > lfc)$logFC) /
+                   length(subset(df, (grepl("contaminant", ProteinId) | GeneSymbol %in% c("ACACA", "PC", "PCCA", "PCCB", "MCCC1", "MCCC2")))$logFC) * 100,
+                 length(subset(df, GeneSymbol %in% tf_motifs$pwms & logFC > lfc)$logFC) /
+                   length(subset(df, GeneSymbol %in% tf_motifs$pwms)$logFC) * 100))
+  }
+  
+  roc_lr <- cbind(lfc_cutoff, roc_lr)
+  colnames(roc_lr) <- c("LFC","FPR", "TPR")
+  roc_lr <- data.frame(roc_lr)
+  roc_lr$dist <- sqrt(roc_lr$FPR^2+roc_lr$TPR^2) * sin(atan(roc_lr$TPR/roc_lr$FPR) - pi/4)
+  roc_lr$proj <- sqrt(roc_lr$FPR^2+roc_lr$TPR^2) * cos(atan(roc_lr$TPR/roc_lr$FPR) - pi/4)/sqrt(2)
+  print(roc_lr[which.max(roc_lr$dist),])
+  lfc_cutoffs <- c(lfc_cutoffs, roc_lr[which.max(roc_lr$dist),"LFC"])
+  
+  print(ggplot(roc_lr, aes(FPR, TPR)) + geom_point(size=0.5) + geom_abline(slope = 1,intercept=0, lty=1) + 
+    geom_vline(xintercept = roc_lr[which.max(roc_lr$dist),]$FPR, lty=5) + 
+    geom_hline(yintercept = roc_lr[which.max(roc_lr$dist),]$TPR, lty=5) +
+    geom_segment(x=roc_lr[which.max(roc_lr$dist),]$FPR, 
+                y=roc_lr[which.max(roc_lr$dist),]$TPR, 
+                xend=roc_lr[which.max(roc_lr$dist),]$proj, 
+                yend=roc_lr[which.max(roc_lr$dist),]$proj, lty=1, lwd=0.1) + coord_cartesian(expand=F) + 
+    theme_classic() + ylim(0, 105) + xlim(0, 105) +
+    xlab("Estimated False Positive Rate (%)") + ylab("Estimated True Positive Rate (%)"))
+}  
+```
+
+```{r, eval=T}
+protein_exclusion_list <- unique(c(intersect(intersect(subset(vero_mock, logFC < lfc_cutoffs[1])$ProteinId, 
+                                                       subset(vero_sars1, logFC < lfc_cutoffs[2])$ProteinId),
+                                             intersect(subset(vero_sars2, logFC < lfc_cutoffs[3])$ProteinId, 
+                                                       subset(vero_mers, logFC < lfc_cutoffs[4])$ProteinId)),
+                                   subset(vero_mock, grepl("contaminant", ProteinId) | 
+                                            grepl("BCHK3", ProteinId) | grepl("BC279", ProteinId))$ProteinId))
+```
+
+# Analysis of vero_mock - TF enrichment
+
+```{r, eval=T}
+vero_mock_ranks <- vero_mock$logFC
+names(vero_mock_ranks) <- vero_mock$GeneSymbol
+vero_mock_ranks <- vero_mock_ranks[which(names(vero_mock_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+
+vero_sars1_ranks <- vero_sars1$logFC
+names(vero_sars1_ranks) <- vero_sars1$GeneSymbol
+vero_sars1_ranks <- vero_sars1_ranks[which(names(vero_sars1_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+
+vero_sars2_ranks <- vero_sars2$logFC
+names(vero_sars2_ranks) <- vero_sars2$GeneSymbol
+vero_sars2_ranks <- vero_sars2_ranks[which(names(vero_sars2_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+
+vero_mers_ranks <- vero_mers$logFC
+names(vero_mers_ranks) <- vero_mers$GeneSymbol
+vero_mers_ranks <- vero_mers_ranks[which(names(vero_mers_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+```
+
+```{r, eval=T, fig.width=1.2, fig.height=1}
+set.seed(1)
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_mock_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_mock_ranks) + geom_text(data=data.frame(), aes(x = length(vero_mock_ranks) * 3.4/5, y = 0.38, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero Mock\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.47)) + xlim(c(0,6050))
+
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_sars1_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_sars1_ranks) + geom_text(data=data.frame(), aes(x = length(vero_sars1_ranks) * 3.4/5, y = 0.38, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero HKU5-SARS\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.47)) + xlim(c(0,6050))
+
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_sars2_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_sars2_ranks) + geom_text(data=data.frame(), aes(x = length(vero_sars2_ranks) * 3.4/5, y = 0.38, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero SARS2\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.47)) + xlim(c(0,6050))
+
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_mers_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_mers_ranks) + geom_text(data=data.frame(), aes(x = length(vero_mers_ranks) * 3.4/5, y = 0.38, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero MERS\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.47)) + xlim(c(0,6050))
+```
+
+```{r, eval=T}
+tmt_peptides_filt <- subset(tmt_peptides[,c(1:4, which(grepl("_TP", colnames(tmt_peptides))))], !(ProteinId %in% protein_exclusion_list))
+tmt_peptides_filt <- subset(tmt_peptides_filt, grepl("_CHLSB",ProteinId))
+
+tmt_peptides_norm <- data.frame(tmt_peptides_filt[,c(1:4)], log2((as.matrix(tmt_peptides_filt[,-c(1:4)]))+1))
+
+colnames(tmt_peptides_norm)[-c(1:4)] <- colnames(tmt_peptides_filt)[grepl("_TP", colnames(tmt_peptides_filt))]
+
+# need to collapse peptides into proteins and/or protein groups...
+# two steps:
+# first, collapse proteins with unique peptides only
+# second, collapse protein groups with more than one protein
+# use average to collapse peptides in the normalized log2 setting
+tmt_proteins_norm <- subset(tmt_peptides_norm, Unique.Razor=="U")[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame()
+tmt_proteins_norm <- rbind(tmt_proteins_norm,
+             subset(tmt_peptides_norm, !(ProteinId %in% tmt_proteins_norm$ProteinId))[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame())
+
+tmt_proteins_norm <- merge(tmt_proteins_norm, unique(tmt_peptides_norm[,1:2]), by.x=1, by.y=1)
+row.names(tmt_proteins_norm) <- tmt_proteins_norm$ProteinId
+
+tmt_proteins_norm$uniprot <- unlist(strsplit(tmt_proteins_norm$ProteinId, "|", fixed=T))[seq(2, length(tmt_proteins_norm$ProteinId)*3, 3)]
+tmt_proteins_norm$uniprot <- str_replace_all(tmt_proteins_norm$uniprot, "-.*", "")
+
+tmt_proteins_norm <- tmt_proteins_norm[,c(1,10,11,2:9)]
+```
+
+```{r, eval=T}
+pc <- prcomp(t(tmt_proteins_norm[,-c(1:3)]))
+
+df.pc <- data.frame(pc$x, label=unlist(strsplit(colnames(tmt_proteins_norm[,-c(1:3)]), "_"))[c(T,F,F)])
+df.pc$label <- factor(df.pc$label, levels=c("Mock", "HKU5-SARS", "SARS2", "MERS"))
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+# Figure 1E
+ggplot(df.pc, aes(PC1, PC2)) + 
+  geom_point(size=3, aes(color=label)) + theme_classic() + #geom_text_repel(aes(label=label)) +
+  xlab(paste0("iDAPT-MS PC1 (", 100*summary(pc)$importance[2,1], "% of variance)")) + ylab(paste0("iDAPT-MS PC2 (", 100*summary(pc)$importance[2,2], "% of variance)")) + geom_vline(xintercept=0, lty=3, color="red") + theme(legend.position = "none") #theme(legend.title=element_blank())
+```
+
+```{r, eval=T}
+# limma
+TS <- factor(c(rep("mock",2), rep("sars1",2), rep("sars2",2), rep("mers",2)))
+design <- model.matrix(~0 + TS)
+colnames(design) <- c(levels(TS))
+fit <- lmFit(tmt_proteins_norm[,4:11], design)
+
+cont.matrix <- makeContrasts(
+  sars1.mock = sars1 - mock,
+  sars2.mock = sars2 - mock,
+  mers.mock = mers - mock,
+  levels = design)
+fit.adj <- contrasts.fit(fit, cont.matrix)
+fit.adj <- eBayes(fit.adj, trend=T, robust=T)
+
+vero_sars1.mock <- topTable(fit.adj, number=100000, coef = "sars1.mock", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_sars1.mock <- merge(tmt_proteins_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_sars1.mock, by.x=1, by.y=0)
+
+vero_sars2.mock <- topTable(fit.adj, number=100000, coef = "sars2.mock", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_sars2.mock <- merge(tmt_proteins_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_sars2.mock, by.x=1, by.y=0)
+
+vero_mers.mock <- topTable(fit.adj, number=100000, coef = "mers.mock", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_mers.mock <- merge(tmt_proteins_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_mers.mock, by.x=1, by.y=0)
+
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+# Figure 1D
+set.seed(5)
+ggplot(subset(vero_sars2.mock, substrRight(ProteinId,5)!="SARS2"), aes(x=logFC, y=-log10(adj.P.Val))) + geom_point(pch=20, color="lightgray", alpha=0.2, data=subset(vero_sars2.mock, (abs(logFC) < 0.5 | adj.P.Val > 0.05) & substrRight(ProteinId,5)!="SARS2")) + geom_point(pch=20, color="indianred", data=subset(vero_sars2.mock, adj.P.Val < 0.05 & logFC > 0.5 & substrRight(ProteinId,5)!="SARS2"), alpha=0.2) + geom_point(pch=20, color="skyblue", data=subset(vero_sars2.mock, adj.P.Val < 0.05 & logFC < -0.5 & substrRight(ProteinId,5)!="SARS2"), alpha=0.2) + theme_classic() + geom_hline(yintercept=0, lty=3) +
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("iDAPT-MS Log2 Fold Change,\nVero SARS2 vs. Mock Infection") + geom_point(data=subset(vero_sars2.mock, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & abs(logFC) > 0.5), color="black", pch=1, alpha=0.5) + geom_point(data=subset(vero_sars2.mock, GeneSymbol %in% c("TP53", "JUN", "EGR1", "REL", "THRB", "CXXC5")), color="black") + geom_text_repel(data=subset(vero_sars2.mock,GeneSymbol %in% c("TP53", "JUN", "EGR1", "REL", "THRB", "CXXC5")), aes(label=GeneSymbol), max.overlaps = 10, force=20, nudge_x=0.5, nudge_y=0.5, size=3, segment.alpha=0.3) + xlim(c(-2,2.5)) + geom_vline(xintercept=c(-0.5,0.5), lty=3)
+```
+
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+set.seed(5)
+ggplot(subset(vero_mers.mock, substrRight(ProteinId,4)!="MERS"), aes(x=logFC, y=-log10(adj.P.Val))) + geom_point(pch=20, color="lightgray", alpha=0.2, data=subset(vero_mers.mock, (abs(logFC) < 0.5 | adj.P.Val > 0.05) & substrRight(ProteinId,4)!="MERS")) + geom_point(pch=20, color="indianred", data=subset(vero_mers.mock, adj.P.Val < 0.05 & logFC > 0.5 & substrRight(ProteinId,4)!="MERS"), alpha=0.2) + geom_point(pch=20, color="skyblue", data=subset(vero_mers.mock, adj.P.Val < 0.05 & logFC < -0.5 & substrRight(ProteinId,5)!="MERS"), alpha=0.2) + theme_classic() + geom_hline(yintercept=0, lty=3) +
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("iDAPT-MS Log2 Fold Change,\nVero MERS vs. Mock Infection") + geom_point(data=subset(vero_mers.mock, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & abs(logFC) > 0.5), color="black", pch=1, alpha=0.5) + geom_point(data=subset(vero_mers.mock, GeneSymbol %in% c("JUN",  "EGR1", "REL", "THRB", "CXXC5")), color="black") + geom_text_repel(data=subset(vero_mers.mock,GeneSymbol %in% c("TP53", "JUN",  "EGR1", "REL", "THRB", "CXXC5")), aes(label=GeneSymbol), max.overlaps = 10, force=20, nudge_x=0.4, size=3, segment.alpha=0.3) + xlim(c(-2,2.5)) + geom_vline(xintercept=c(-0.5,0.5), lty=3) + geom_point(data=subset(vero_mers.mock, GeneSymbol %in% c("TP53")), color="red")
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+set.seed(5)
+ggplot(subset(vero_sars1.mock, substrRight(ProteinId,4)!="SARS"), aes(x=logFC, y=-log10(adj.P.Val))) + geom_point(pch=20, color="lightgray", alpha=0.2, data=subset(vero_sars1.mock, (abs(logFC) < 0.5 | adj.P.Val > 0.05) & substrRight(ProteinId,4)!="SARS")) + geom_point(pch=20, color="indianred", data=subset(vero_sars1.mock, adj.P.Val < 0.05 & logFC > 0.5 & substrRight(ProteinId,4)!="SARS"), alpha=0.2) + geom_point(pch=20, color="skyblue", data=subset(vero_sars1.mock, adj.P.Val < 0.05 & logFC < -0.5 & substrRight(ProteinId,5)!="SARS"), alpha=0.2) + theme_classic() + geom_hline(yintercept=0, lty=3) +
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("iDAPT-MS Log2 Fold Change,\nVero HKU5-S1 vs. Mock Infection") + geom_point(data=subset(vero_sars1.mock, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & abs(logFC) > 0.5), color="black", pch=1, alpha=0.5) + geom_point(data=subset(vero_sars1.mock, GeneSymbol %in% c("JUN",  "EGR1", "REL", "THRB", "CXXC5")), color="black") + geom_text_repel(data=subset(vero_sars1.mock,GeneSymbol %in% c("TP53", "JUN",  "EGR1", "REL", "THRB", "CXXC5")), aes(label=GeneSymbol), max.overlaps = 10, force=20, nudge_x=0.4, size=3, segment.alpha=0.3) + xlim(c(-2,2.5)) + geom_vline(xintercept=c(-0.5,0.5), lty=3) + geom_point(data=subset(vero_sars1.mock, GeneSymbol %in% c("TP53")), color="red")
+```
+
+```{r, eval=T}
+sars2_tfs_dn <- subset(vero_sars2.mock, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & (logFC) < -0.5)$GeneSymbol
+sars2_tfs_up <- subset(vero_sars2.mock, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & (logFC) > 0.5)$GeneSymbol
+
+sars2_tfs_dn
+sars2_tfs_up
+```
+
+```{r, eval=T}
+tmt_protein_mat <- subset(tmt_proteins_norm, GeneSymbol %in% c(sars2_tfs_dn, sars2_tfs_up))[,c(4:11)]
+row.names(tmt_protein_mat) <- subset(tmt_proteins_norm, GeneSymbol %in% c(sars2_tfs_dn, sars2_tfs_up))$GeneSymbol
+colnames(tmt_protein_mat) <- c("Mock_1", "Mock_2", "HKU5-S1_1", "HKU5-S1_2", "SARS2_1", "SARS2_2", "MERS_1", "MERS_2")
+```
+
+```{r, eval=T}
+crispr_csab <- read.csv(file="DATASETS/wei_screen_csab.csv", header=T)
+row.names(crispr_csab) <- crispr_csab$Gene
+
+tmt_protein_mat <- tmt_protein_mat[order(-cor(t(tmt_protein_mat), c(0,0,0,0,1,1,0,0))),]
+
+annotation_row <- data.frame(`HKU5S1_Sig`= ifelse(abs(vero_sars1.mock[(match(row.names(tmt_protein_mat), vero_sars2.mock$GeneSymbol)),"logFC"]) > 0.5 & vero_sars1.mock[(match(row.names(tmt_protein_mat), vero_sars2.mock$GeneSymbol)),"adj.P.Val"] < 0.05, 1, 0),
+                             `MERS_Sig` = ifelse(abs(vero_mers.mock[(match(row.names(tmt_protein_mat), vero_sars2.mock$GeneSymbol)),"logFC"]) > 0.5 & vero_mers.mock[(match(row.names(tmt_protein_mat), vero_sars2.mock$GeneSymbol)),"adj.P.Val"] < 0.05, 1, 0),
+                             `SARS2_Sig` = ifelse(abs(vero_sars2.mock[(match(row.names(tmt_protein_mat), vero_sars2.mock$GeneSymbol)),"logFC"]) > 0.5 & vero_sars2.mock[(match(row.names(tmt_protein_mat), vero_sars2.mock$GeneSymbol)),"adj.P.Val"] < 0.05, 1, 0),
+                             CRISPR = ifelse((crispr_csab[row.names(tmt_protein_mat),"SARS.CoV.2.Cas9.V2.Avg."]) > 2 & !is.na(crispr_csab[row.names(tmt_protein_mat),"SARS.CoV.2.Cas9.V2.Avg."]), 1, 
+                                             ifelse((crispr_csab[row.names(tmt_protein_mat),"SARS.CoV.2.Cas9.V2.Avg."]) < -2 & !is.na(crispr_csab[row.names(tmt_protein_mat),"SARS.CoV.2.Cas9.V2.Avg."]), -1, 0)),
+                             Specificity=cor(t(tmt_protein_mat), c(0,0,0,0,1,1,0,0)),
+                             row.names=row.names(tmt_protein_mat))
+
+anno_colors <- list(Specificity = rev(mako(9)),
+                    `SARS2_Sig` = c("black", "black"),
+                    `MERS_Sig` = c("white", "black"),
+                    `HKU5S1_Sig` = c("white", "black"),
+                    CRISPR = c(viridis(2)[2], "white", viridis(2)[1]))
+```
+
+```{r, eval=T, fig.width=1.7, fig.height=1.6}
+# Figure 1F
+pheatmap(tmt_protein_mat,
+         annotation_row=annotation_row, annotation_colors = anno_colors,
+         cellwidth=6, cellheight=6, fontsize=6,
+         cluster_cols = F, cluster_rows = F, scale="row",
+         color = c(colorRampPalette(c("blue", "white", "white", "red"))(8)), #gaps_col = 4, gaps_row = 1,
+         breaks = seq(-2, 2, 0.5))
+```
+
+```{r, eval=T}
+crispr_csab_qn <- (normalize.quantiles(as.matrix(crispr_csab[,c(4,5,7)])))
+colnames(crispr_csab_qn) <- colnames(crispr_csab[,c(4,5,7)])
+row.names(crispr_csab_qn) <- crispr_csab$Gene
+crispr_csab_qn <- data.frame(crispr_csab_qn)
+crispr_csab_qn$Gene <- row.names(crispr_csab_qn)
+
+crispr_csab_qn <- melt(crispr_csab_qn)
+levels(crispr_csab_qn$variable) <- c("MERS", "HKU5-S1", "SARS2")
+crispr_csab_qn$variable <- factor(crispr_csab_qn$variable, levels=c("HKU5-S1", "SARS2", "MERS"))
+```
+
+```{r, eval=T, fig.width=1.8, fig.height=1}
+# Figure 1G
+ggplot(crispr_csab_qn) + geom_violin(aes(x=variable, y=value), draw_quantiles=0.5) + geom_point(data=subset(crispr_csab_qn, Gene=="TP53"), color="red", size=4, aes(x=variable, y=value)) + geom_segment(data=subset(crispr_csab_qn, Gene=="TP53"), color="red", lty=3, aes(x=variable, y=value, yend=0, xend=variable)) + theme_classic() + ylab("TP53 Effect\nQuantile-Normalized Z-Score\nVeroE6 Virus vs. Mock Infection") + xlab("") + coord_flip()
+```
+
+```{r, eval=T}
+write.table(vero_sars1.mock, file="vero_sars1.mock.txt", sep='\t', quote=F)
+write.table(vero_sars2.mock, file="vero_sars2.mock.txt", sep='\t', quote=F)
+write.table(vero_mers.mock, file="vero_mers.mock.txt", sep='\t', quote=F)
+```
+
+
+
+

@@ -1,0 +1,134 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(limma)
+library(biomaRt)
+library(fgsea)
+library(viridis)
+
+#BiocManager::install(c("RBGL","graph","reshape"))
+#install.packages("Vennerable", repos="http://R-Forge.R-project.org")
+library(Vennerable)
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+```
+
+# Vero SARS-2 ORF ATAC-seq analysis
+
+```{r, eval=T}
+load("DATASETS/csab_cisbp_pwms.rda")
+```
+
+```{r, eval=T}
+# read in ATAC-seq read pileups within peaks from bash
+atac_counts <- read.table(file="DATASETS/atacseq_vero_orf_counts.txt", header=T)
+
+# read in ATAC-seq library information
+sampleinfo <- data.frame(row.names = colnames(atac_counts),
+                         Batch = unlist(strsplit(colnames(atac_counts), "[.]"))[c(T,F,F,F)],
+                         Plasmid = unlist(strsplit(colnames(atac_counts), "[.]"))[c(F,T,F,F)],
+                         Gene = unlist(strsplit(colnames(atac_counts), "[.]"))[c(F,F,T,F)],
+                         Replicate = unlist(strsplit(colnames(atac_counts), "[.]"))[c(F,F,F,T)])
+
+sampleinfo$Group <- sampleinfo$Gene
+sampleinfo$Group[which(sampleinfo$Gene %in% c("EV", "EGFP"))] <- "Ctrl"
+sampleinfo$Group <- paste0(sampleinfo$Batch, "-", sampleinfo$Group)
+```
+
+```{r, eval=T}
+atac_dds <- DESeqDataSetFromMatrix(countData = atac_counts, colData = sampleinfo, design = ~Group)
+atac_dds <- estimateSizeFactors(atac_dds)
+
+atac_dds_B <- atac_dds
+atac_dds_B$Group <- relevel(atac_dds_B$Group, "B-Ctrl")
+```
+
+```{r, eval=T}
+atac_dds <- DESeq(atac_dds)
+```
+
+```{r, eval=T}
+atac_sigpeaks <- data.frame()
+for(b in unique(sampleinfo$Batch)){
+for(l in unique(subset(sampleinfo, Batch==b & !(Gene %in% c("EV", "EGFP")))$Group)){
+  atac_results_temp <- data.frame(results(atac_dds, contrast=c("Group", l, paste0(b,"-","Ctrl"))))
+  atac_sigpeaks <- rbind(atac_sigpeaks, data.frame(group = l,
+        sigpeaks = -dim(subset(atac_results_temp, padj < 0.05 & log2FoldChange < 0))[1],
+        sign = "neg"))
+  atac_sigpeaks <- rbind(atac_sigpeaks, data.frame(group = l,
+        sigpeaks = dim(subset(atac_results_temp, padj < 0.05 & log2FoldChange > 0))[1],
+        sign = "pos"))
+}}
+
+atac_sigpeaks$group2 <- unlist(strsplit(atac_sigpeaks$group, "-"))[c(F,T)]
+atac_sigpeaks$group2 <- factor(atac_sigpeaks$group2, levels=c(paste0("nsp", 1:16), "S", "orf3a", "orf3b", "E", "M", "orf6", "orf7a", "orf7b", "orf8", "orf9b", "orf9c", "orf10", "N"))
+```
+
+```{r, eval=T, fig.width=3, fig.height=1.2}
+# Figure 2A
+ggplot(atac_sigpeaks, aes(x=group2, y=sigpeaks, color=sign, pch=sign)) + geom_point() + ylim(c(-1000, 2500)) + theme_classic() + geom_hline(yintercept=0) + theme(legend.position="none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("# Significant\nATAC-seq Peaks\nVeroE6 Transfection") + xlab("") + scale_color_manual(values=c("red", "black")) + scale_shape_manual(values=c(1, 2))
+```
+
+```{r, eval=T}
+atac_dds_B <- DESeq(atac_dds_B)
+```
+
+```{r, eval=T}
+results_vero_spike <- data.frame(lfcShrink(atac_dds_B, coef=10))
+results_vero_nsp1 <- data.frame(lfcShrink(atac_dds, coef=2))
+```
+
+```{r, eval=T}
+# from Table S1 - ATAC-seq
+atacseq_vero_sars2.mock <- read.table(file="DATASETS/atacseq_vero_sars2.mock.txt", sep='\t', header=T)
+```
+
+```{r, eval=T}
+cor.test((subset(merge(atacseq_vero_sars2.mock, results_vero_spike, by=0), padj.x < 0.05 & padj.y < 0.05)$log2FoldChange.x),
+    (subset(merge(atacseq_vero_sars2.mock, results_vero_spike, by=0), padj.x < 0.05 & padj.y < 0.05)$log2FoldChange.y))
+
+cor.test((subset(merge(atacseq_vero_sars2.mock, results_vero_nsp1, by=0), padj.x < 0.05 & padj.y < 0.05)$log2FoldChange.x),
+    (subset(merge(atacseq_vero_sars2.mock, results_vero_nsp1, by=0), padj.x < 0.05 & padj.y < 0.05)$log2FoldChange.y))
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+ggplot(subset(merge(atacseq_vero_sars2.mock, results_vero_spike, by=0), padj.x < 0.05 & padj.y < 0.05)) + geom_point(aes(x=(log2FoldChange.x), y=(log2FoldChange.y)), alpha=0.2, pch=1) + xlim(c(-3.5,3.5)) + ylim(c(-3.5,3.5)) + geom_smooth(method="lm", formula=y~x, aes(x=(log2FoldChange.x), y=(log2FoldChange.y))) + theme_classic() + geom_hline(yintercept=0, lty=3) + geom_vline(xintercept=0, lty=3) + xlab("Vero SARS-CoV-2 vs. Mock\nLog2 Fold Change, ATAC-seq") + ylab("Vero Spike vs. Control\nLog2 Fold Change, ATAC-seq")
+
+ggplot(subset(merge(atacseq_vero_sars2.mock, results_vero_nsp1, by=0), padj.x < 0.05 & padj.y < 0.05)) + geom_point(aes(x=(log2FoldChange.x), y=(log2FoldChange.y)), alpha=0.2, pch=1) + xlim(c(-3.5,3.5)) + ylim(c(-3.5,3.5)) + geom_smooth(method="lm", formula=y~x, aes(x=(log2FoldChange.x), y=(log2FoldChange.y))) + theme_classic() + geom_hline(yintercept=0, lty=3) + geom_vline(xintercept=0, lty=3) + xlab("Vero SARS-CoV-2 vs. Mock\nLog2 Fold Change, ATAC-seq") + ylab("Vero Nsp1 vs. Control\nLog2 Fold Change, ATAC-seq")
+```
+
+```{r, eval=T}
+write.table(results_vero_nsp1, file="atacseq_vero_nsp1.txt", sep='\t', quote=F)
+write.table(results_vero_spike, file="atacseq_vero_spike.txt", sep='\t', quote=F)
+```
+
+```{r, eval=T, fig.width=2, fig.height=2}
+v <- Venn(SetNames=c("",""),
+            Weight=c(`10`=(2152+462-34-22-2-1),
+                     `01`=(1085+176-34-22-2-1),
+                     `11`=-(-34-22-2-1),
+                     `00`=0))
+vA <- compute.Venn(v, doWeights = TRUE)
+gp <- VennThemes(vA, colourAlgorithm = "signature")
+gp$Face$`11`$fill <-  "white";
+gp$Face$`01`$fill <-  "white";
+gp$Face$`10`$fill <-  "white";
+gp$Set$Set1$col <- "black"
+gp$Set$Set2$col <- "red"
+
+plot(v, doWeights = TRUE, gpList = gp, show = list(SetLabels=F, FaceText=F))
+```
+
+

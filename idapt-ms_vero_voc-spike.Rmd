@@ -1,0 +1,298 @@
+---
+title: "iDAPT-MS and SARS-CoV-2 R Markdown"
+output: html_document
+date: '2023-10-23'
+---
+
+```{r, eval=T}
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(limma)
+library(biomaRt)
+library(fgsea)
+library(viridis)
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+```
+
+# Vero SARS-2 VOC spike iDAPT-MS analysis
+
+```{r, eval=T, fig.width=2.5, fig.height=2}
+# In Table S3
+tmt_peptides_spike <- read.csv(file="DATASETS/idapt-ms_vero_voc_psms.csv")
+
+tmt_peptides_spike$GeneSymbol <- as.character(tmt_peptides_spike$GeneSymbol)
+tmt_peptides_spike$GeneSymbol[which(grepl("-Mar", tmt_peptides_spike$GeneSymbol))] <- paste0("MARCH", str_replace(tmt_peptides_spike$GeneSymbol[which(grepl("-Mar", tmt_peptides_spike$GeneSymbol))], "-.*", ""))
+tmt_peptides_spike$GeneSymbol[which(grepl("-Sep", tmt_peptides_spike$GeneSymbol))] <- paste0("SEPT", str_replace(tmt_peptides_spike$GeneSymbol[which(grepl("-Sep", tmt_peptides_spike$GeneSymbol))], "-.*", ""))
+
+tmt_peptides_spike <- data.frame(ProteinId=tmt_peptides_spike[,c(1)], GeneSymbol=tmt_peptides_spike[,2], GroupId=tmt_peptides_spike[,c(4)], Unique.Razor=tmt_peptides_spike[,c(7)], tmt_peptides_spike[,c(8:23)])
+colnames(tmt_peptides_spike)[c(5:20)] <- c(paste0("Vero_EGFP_T_", 1:2), 
+                                           paste0("Vero_EGFP_TP_", 1:2), 
+                                           paste0("Vero_Spike_T_", 1:2), 
+                                           paste0("Vero_Spike_TP_", 1:2), 
+                                           paste0("Vero_Alpha_T_", 1:2), 
+                                           paste0("Vero_Alpha_TP_", 1:2),
+                                           paste0("Vero_Delta_T_", 1:2), 
+                                           paste0("Vero_Delta_TP_", 1:2))
+```
+
+# first perform no normalization to identify and exclude background signal in T-labeled samples (vs. TP)
+
+```{r, eval=T}
+normalization <- rep(1, 16)
+tmt_peptides_spike_norm <- data.frame(tmt_peptides_spike[,c(1:4)], log2(sweep(tmt_peptides_spike[,-c(1:4)], 2, normalization, "/")+1))
+
+# need to collapse peptides into proteins and/or protein groups...
+# two steps:
+# first, collapse proteins with unique peptides only
+# second, collapse protein groups with more than one protein
+# use average to collapse peptides in the normalized log2 setting
+tmt_proteins_spike_norm <- subset(tmt_peptides_spike_norm, Unique.Razor=="U")[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame() # 2056 uniquely quantifiable proteins
+tmt_proteins_spike_norm <- rbind(tmt_proteins_spike_norm,
+             subset(tmt_peptides_spike_norm, !(ProteinId %in% tmt_proteins_spike_norm$ProteinId))[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame()) # 6245 proteins...
+
+tmt_proteins_spike_norm <- merge(tmt_proteins_spike_norm, unique(tmt_peptides_spike_norm[,1:2]), by.x=1, by.y=1)
+row.names(tmt_proteins_spike_norm) <- tmt_proteins_spike_norm$ProteinId
+
+tmt_proteins_spike_norm$uniprot <- unlist(strsplit(tmt_proteins_spike_norm$ProteinId, "|", fixed=T))[seq(2, length(tmt_proteins_spike_norm$ProteinId)*3, 3)]
+tmt_proteins_spike_norm$uniprot <- str_replace_all(tmt_proteins_spike_norm$uniprot, "-.*", "")
+
+tmt_proteins_spike_norm <- tmt_proteins_spike_norm[,c(1,18,19,2:17)]
+
+# limma
+TS <- factor(c(rep("egfp",4), rep("spike",4), rep("alpha",4), rep("delta",4)))
+ctrl <- factor(rep(c("_T", "_T", "_TP", "_TP"), 4))
+TS <- factor(paste0(TS, ctrl))
+design <- model.matrix(~0 + TS)
+colnames(design) <- c(levels(TS))
+fit <- lmFit(tmt_proteins_spike_norm[,4:19], design)
+
+cont.matrix <- makeContrasts(
+  egfp = egfp_TP - egfp_T,
+  spike = spike_TP - spike_T,
+  alpha = alpha_TP - alpha_T,
+  delta = delta_TP - delta_T,
+  levels = design)
+fit.adj <- contrasts.fit(fit, cont.matrix)
+fit.adj <- eBayes(fit.adj) #, trend=T, robust=T)
+
+vero_egfp <- topTable(fit.adj, number=100000, coef = "egfp", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_egfp <- merge(tmt_proteins_spike_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_egfp, by.x=1, by.y=0)
+
+vero_spike <- topTable(fit.adj, number=100000, coef = "spike", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_spike <- merge(tmt_proteins_spike_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_spike, by.x=1, by.y=0)
+
+vero_alpha <- topTable(fit.adj, number=100000, coef = "alpha", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_alpha <- merge(tmt_proteins_spike_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_alpha, by.x=1, by.y=0)
+
+vero_delta <- topTable(fit.adj, number=100000, coef = "delta", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_delta <- merge(tmt_proteins_spike_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_delta, by.x=1, by.y=0)
+
+```
+
+
+```{r, eval=T}
+csab_genes <- getBM(attributes= c("entrezgene_id","ensembl_gene_id", "external_gene_name"),
+                     mart = useDataset("csabaeus_gene_ensembl", useMart("ensembl")))
+```
+
+```{r, eval=T}
+load("DATASETS/csab_cisbp_pwms.rda")
+
+tf_motifs <- list(pwms = unique(subset(csab_genes, ensembl_gene_id %in% names(csab_cisbp_pwms) & external_gene_name != "")$external_gene_name))
+
+```
+
+# Analysis of vero_mock - TF
+
+```{r, eval=T}
+vero_egfp_ranks <- vero_egfp$logFC
+names(vero_egfp_ranks) <- vero_egfp$GeneSymbol
+vero_egfp_ranks <- vero_egfp_ranks[which(names(vero_egfp_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+
+vero_spike_ranks <- vero_spike$logFC
+names(vero_spike_ranks) <- vero_spike$GeneSymbol
+vero_spike_ranks <- vero_spike_ranks[which(names(vero_spike_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+
+vero_alpha_ranks <- vero_alpha$logFC
+names(vero_alpha_ranks) <- vero_alpha$GeneSymbol
+vero_alpha_ranks <- vero_alpha_ranks[which(names(vero_alpha_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+
+vero_delta_ranks <- vero_delta$logFC
+names(vero_delta_ranks) <- vero_delta$GeneSymbol
+vero_delta_ranks <- vero_delta_ranks[which(names(vero_delta_ranks) %in% setdiff(csab_genes$external_gene_name, ""))]
+```
+
+```{r, eval=T, fig.width=3, fig.height=2.5}
+set.seed(1)
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_egfp_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_egfp_ranks) + geom_text(data=data.frame(), aes(x = length(vero_egfp_ranks) * 3.5/5, y = 0.43, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero EGFP\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.5)) + xlim(c(0,6400))
+
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_spike_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_spike_ranks) + geom_text(data=data.frame(), aes(x = length(vero_spike_ranks) * 3.5/5, y = 0.43, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero Spike\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.5)) + xlim(c(0,6400))
+
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_alpha_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_alpha_ranks) + geom_text(data=data.frame(), aes(x = length(vero_alpha_ranks) * 3.5/5, y = 0.43, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero Alpha\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.5)) + xlim(c(0,6400))
+
+fgsea_pwm <- fgsea(pathways=tf_motifs, 
+                   stats=vero_delta_ranks, 
+                   nperm=10000)
+fgsea_pwm <- fgsea_pwm[order(fgsea_pwm$NES),]
+fgsea_pwm$pathway <- factor(fgsea_pwm$pathway, levels=unique(fgsea_pwm$pathway))
+
+plotEnrichment(tf_motifs$pwms, vero_delta_ranks) + geom_text(data=data.frame(), aes(x = length(vero_delta_ranks) * 3.5/5, y = 0.43, label = paste0("NES = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$NES, 4), "\np = ", signif(subset(data.frame(fgsea_pwm[,1:7]), pathway=="pwms")$pval, 3))), hjust=0, size=3, fontface="plain", lineheight=0.8)  + xlab("Vero Delta\niDAPT-MS TP vs. T") + ylab("Enrichment\nScore") + ylim(c(-0.05,0.5)) + xlim(c(0,6400))
+
+```
+
+# thresholding to filter out noise
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+lfc_cutoffs <- c()
+
+for(df in list(vero_egfp, vero_spike, vero_alpha, vero_delta)){
+  lfc_cutoff <- seq(-2, 10, 0.01)
+  roc_lr <- NULL
+  for(lfc in lfc_cutoff){
+    roc_lr <- rbind(roc_lr,
+               c(length(subset(df, (grepl("contaminant", ProteinId) | GeneSymbol %in% c("ACACA", "PC", "PCCA", "PCCB", "MCCC1", "MCCC2")) & logFC > lfc)$logFC) /
+                   length(subset(df, (grepl("contaminant", ProteinId) | GeneSymbol %in% c("ACACA", "PC", "PCCA", "PCCB", "MCCC1", "MCCC2")))$logFC) * 100,
+                 length(subset(df, GeneSymbol %in% tf_motifs$pwms & logFC > lfc)$logFC) /
+                   length(subset(df, GeneSymbol %in% tf_motifs$pwms)$logFC) * 100))
+  }
+  
+  roc_lr <- cbind(lfc_cutoff, roc_lr)
+  colnames(roc_lr) <- c("LFC","FPR", "TPR")
+  roc_lr <- data.frame(roc_lr)
+  roc_lr$dist <- sqrt(roc_lr$FPR^2+roc_lr$TPR^2) * sin(atan(roc_lr$TPR/roc_lr$FPR) - pi/4)
+  roc_lr$proj <- sqrt(roc_lr$FPR^2+roc_lr$TPR^2) * cos(atan(roc_lr$TPR/roc_lr$FPR) - pi/4)/sqrt(2)
+  print(roc_lr[which.max(roc_lr$dist),])
+  lfc_cutoffs <- c(lfc_cutoffs, roc_lr[which.max(roc_lr$dist),"LFC"])
+  
+  print(ggplot(roc_lr, aes(FPR, TPR)) + geom_point(size=0.5) + geom_abline(slope = 1,intercept=0, lty=1) + 
+    geom_vline(xintercept = roc_lr[which.max(roc_lr$dist),]$FPR, lty=5) + 
+    geom_hline(yintercept = roc_lr[which.max(roc_lr$dist),]$TPR, lty=5) +
+    geom_segment(x=roc_lr[which.max(roc_lr$dist),]$FPR, 
+                y=roc_lr[which.max(roc_lr$dist),]$TPR, 
+                xend=roc_lr[which.max(roc_lr$dist),]$proj, 
+                yend=roc_lr[which.max(roc_lr$dist),]$proj, lty=1, lwd=0.1) + coord_cartesian(expand=F) + 
+    theme_classic() + ylim(0, 105) + xlim(0, 105) +
+    xlab("Estimated False Positive Rate (%)") + ylab("Estimated True Positive Rate (%)"))
+}  
+```
+
+```{r, eval=T}
+protein_exclusion_list <- unique(c(intersect(intersect(subset(vero_egfp, logFC < lfc_cutoffs[1])$ProteinId, 
+                                                       subset(vero_spike, logFC < lfc_cutoffs[2])$ProteinId),
+                                             intersect(subset(vero_alpha, logFC < lfc_cutoffs[3])$ProteinId, 
+                                                       subset(vero_delta, logFC < lfc_cutoffs[4])$ProteinId)),
+                                   subset(vero_egfp, grepl("contaminant", ProteinId) | 
+                                            grepl("BCHK3", ProteinId) | grepl("BC279", ProteinId))$ProteinId))
+```
+
+
+```{r, eval=T}
+tmt_peptides_spike_filt <- subset(tmt_peptides_spike[,c(1:4, which(grepl("_TP", colnames(tmt_peptides_spike))))], !(ProteinId %in% protein_exclusion_list))
+tmt_peptides_spike_filt <- subset(tmt_peptides_spike_filt, grepl("_CHLSB",ProteinId))
+
+tmt_peptides_spike_norm <- data.frame(tmt_peptides_spike_filt[,c(1:4)], log2((as.matrix(tmt_peptides_spike_filt[,-c(1:4)]))+1))
+colnames(tmt_peptides_spike_norm)[-c(1:4)] <- colnames(tmt_peptides_spike_filt)[grepl("_TP", colnames(tmt_peptides_spike_filt))]
+
+# need to collapse peptides into proteins and/or protein groups...
+# two steps:
+# first, collapse proteins with unique peptides only
+# second, collapse protein groups with more than one protein
+# use average to collapse peptides in the normalized log2 setting
+tmt_proteins_spike_norm <- subset(tmt_peptides_spike_norm, Unique.Razor=="U")[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame()
+tmt_proteins_spike_norm <- rbind(tmt_proteins_spike_norm,
+             subset(tmt_peptides_spike_norm, !(ProteinId %in% tmt_proteins_spike_norm$ProteinId))[,-c(2:4)] %>% group_by(ProteinId) %>% summarise_all(mean) %>% as.data.frame())
+
+tmt_proteins_spike_norm <- merge(tmt_proteins_spike_norm, unique(tmt_peptides_spike_norm[,1:2]), by.x=1, by.y=1)
+row.names(tmt_proteins_spike_norm) <- tmt_proteins_spike_norm$ProteinId
+
+tmt_proteins_spike_norm$uniprot <- unlist(strsplit(tmt_proteins_spike_norm$ProteinId, "|", fixed=T))[seq(2, length(tmt_proteins_spike_norm$ProteinId)*3, 3)]
+tmt_proteins_spike_norm$uniprot <- str_replace_all(tmt_proteins_spike_norm$uniprot, "-.*", "")
+
+tmt_proteins_spike_norm <- tmt_proteins_spike_norm[,c(1,10,11,2:9)]
+
+```
+
+```{r, eval=T, fig.width=2, fig.height=2}
+pc <- prcomp(t(tmt_proteins_spike_norm[,-c(1:3)]))
+summary(pc)
+
+ggplot(data.frame(pc$x, label=colnames(tmt_proteins_spike_norm[,-c(1:3)])), aes(PC1, PC2)) + 
+  geom_point(size=3, aes(color=label)) + theme_classic() + geom_text_repel(aes(label=label)) + xlab(paste0("PC1 (", 100*summary(pc)$importance[2,1], "% of variance)")) + ylab(paste0("PC2 (", 100*summary(pc)$importance[2,2], "% of variance)")) + geom_vline(xintercept=0, lty=3, color="red") + theme(legend.position = "none") #theme(legend.title=element_blank())
+```
+
+```{r, eval=T}
+# limma
+TS <- factor(c(rep("egfp",2), rep("spike",2), rep("alpha",2), rep("delta",2)))
+design <- model.matrix(~0 + TS)
+colnames(design) <- c(levels(TS))
+fit <- lmFit(tmt_proteins_spike_norm[,4:11], design)
+
+cont.matrix <- makeContrasts(
+  spike.egfp = spike - egfp,
+  alpha.egfp = alpha - egfp,
+  delta.egfp = delta - egfp,
+  levels = design)
+fit.adj <- contrasts.fit(fit, cont.matrix)
+fit.adj <- eBayes(fit.adj, trend=T, robust=T)
+
+vero_spike.egfp <- topTable(fit.adj, number=100000, coef = "spike.egfp", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_spike.egfp <- merge(tmt_proteins_spike_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_spike.egfp, by.x=1, by.y=0)
+
+vero_alpha.egfp <- topTable(fit.adj, number=100000, coef = "alpha.egfp", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_alpha.egfp <- merge(tmt_proteins_spike_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_alpha.egfp, by.x=1, by.y=0)
+
+vero_delta.egfp <- topTable(fit.adj, number=100000, coef = "delta.egfp", 
+                   adjust.method="fdr",lfc=0, sort.by="logFC", p.value=1)
+vero_delta.egfp <- merge(tmt_proteins_spike_norm[,c("ProteinId", "uniprot", "GeneSymbol")], vero_delta.egfp, by.x=1, by.y=0)
+
+```
+
+```{r, eval=T, fig.width=1.5, fig.height=1.5}
+ggplot(vero_spike.egfp, aes(x=logFC, y=-log10(adj.P.Val))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(vero_spike.egfp,  (abs(logFC) < 0.5 | adj.P.Val > 0.05))) + geom_point(pch=20, color="indianred", data=subset(vero_spike.egfp, adj.P.Val < 0.05 & logFC > 0.5), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(vero_spike.egfp, adj.P.Val < 0.05 & logFC < -0.5), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) +
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("iDAPT-MS Log2 Fold Change,\nVero Spike vs. EGFP") + geom_point(data=subset(vero_spike.egfp, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & abs(logFC) > 0.5), color="black") + geom_text_repel(data=subset(vero_spike.egfp, substrRight(ProteinId,5)=="SARS2"), aes(label=GeneSymbol), max.overlaps = 50) + geom_point(data=subset(vero_spike.egfp, substrRight(ProteinId,5)=="SARS2"), color="red") + geom_point(data=subset(vero_spike.egfp, GeneSymbol=="TP53"), color="black") + geom_text_repel(data=subset(vero_spike.egfp, GeneSymbol=="TP53"), aes(label=GeneSymbol), max.overlaps=50) + xlim(c(-1.5,3.3)) + ylim(c(-0.2, 11)) + geom_vline(xintercept=c(-0.5,0.5), lty=3)
+
+ggplot(vero_alpha.egfp, aes(x=logFC, y=-log10(adj.P.Val))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(vero_alpha.egfp, adj.P.Val > 0.05 | abs(logFC) < 0.5)) + geom_point(pch=20, color="indianred", data=subset(vero_alpha.egfp, adj.P.Val < 0.05 & logFC > 0.5), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(vero_alpha.egfp, adj.P.Val < 0.05 & logFC < -0.5), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) +
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("iDAPT-MS Log2 Fold Change,\nVero Alpha vs. EGFP") + geom_point(data=subset(vero_alpha.egfp, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & abs(logFC) > 0.5), color="black") + geom_text_repel(data=subset(vero_alpha.egfp, substrRight(ProteinId,5)=="SARS2"), aes(label=GeneSymbol), max.overlaps = 50) + geom_point(data=subset(vero_alpha.egfp, substrRight(ProteinId,5)=="SARS2"), color="red") + geom_point(data=subset(vero_alpha.egfp, GeneSymbol=="TP53"), color="black") + geom_text_repel(data=subset(vero_alpha.egfp, GeneSymbol=="TP53"), aes(label=GeneSymbol), max.overlaps=50) + xlim(c(-1.5,3.3)) + ylim(c(-0.2, 11)) + geom_vline(xintercept=c(-0.5,0.5), lty=3)
+
+ggplot(vero_delta.egfp, aes(x=logFC, y=-log10(adj.P.Val))) + geom_point(pch=20, color="lightgray", alpha=0.5, data=subset(vero_delta.egfp, adj.P.Val > 0.05 | abs(logFC) < 0.5)) + geom_point(pch=20, color="indianred", data=subset(vero_delta.egfp, adj.P.Val < 0.05 & logFC > 0.5), alpha=0.5) + geom_point(pch=20, color="skyblue", data=subset(vero_delta.egfp, adj.P.Val < 0.05 & logFC < -0.5), alpha=0.5) + theme_classic() + geom_hline(yintercept=0, lty=3) +
+  geom_hline(yintercept=-log10(0.05), lty=3, color="red") + geom_vline(xintercept=0, lty=3, color="red") + ylab("-Log10 FDR") + xlab("iDAPT-MS Log2 Fold Change,\nVero Delta vs. EGFP") + geom_point(data=subset(vero_delta.egfp, GeneSymbol %in% tf_motifs$pwms & adj.P.Val < 0.05 & abs(logFC) > 0.5), color="black") + geom_text_repel(data=subset(vero_delta.egfp, substrRight(ProteinId,5)=="SARS2"), aes(label=GeneSymbol), max.overlaps = 50) + geom_point(data=subset(vero_delta.egfp, substrRight(ProteinId,5)=="SARS2"), color="red") + geom_point(data=subset(vero_delta.egfp, GeneSymbol=="TP53"), color="black") + geom_text_repel(data=subset(vero_delta.egfp, GeneSymbol %in% c("TP53", "MYBL2", "MLX", "MTF1")), aes(label=GeneSymbol), max.overlaps=50) + xlim(c(-1.5,3.3)) + ylim(c(-0.2, 11)) + geom_vline(xintercept=c(-0.5,0.5), lty=3)
+```
+
+```{r, eval=T}
+write.table(vero_spike.egfp, file="vero_spike.egfp.txt", sep='\t', quote=F)
+write.table(vero_alpha.egfp, file="vero_alpha.egfp.txt", sep='\t', quote=F)
+write.table(vero_delta.egfp, file="vero_delta.egfp.txt", sep='\t', quote=F)
+```
+
+
